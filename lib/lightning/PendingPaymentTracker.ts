@@ -20,6 +20,7 @@ import { type Currency, getLightningClientById } from '../wallet/WalletManager';
 import LightningErrors from './Errors';
 import type { LightningClient, PaymentResponse } from './LightningClient';
 import type LndClient from './LndClient';
+import NoExistingPaymentActionError from './NoExistingPaymentActionError';
 import type ClnClient from './cln/ClnClient';
 import ClnPendingPaymentTracker from './paymentTrackers/ClnPendingPaymentTracker';
 import LndPendingPaymentTracker from './paymentTrackers/LndPendingPaymentTracker';
@@ -110,19 +111,9 @@ class PendingPaymentTracker {
     payments: LightningPayment[];
     existingRelevantAction: LightningPayment | undefined;
   }> => {
-    const paymentHash = getHexString(
-      (await this.sidecar.decodeInvoiceOrOffer(swap.invoice!)).paymentHash!,
-    );
+    const { paymentHash, payments, existingRelevantAction } =
+      await this.getPaymentActions(swap);
 
-    const payments =
-      await LightningPaymentRepository.findByPreimageHash(paymentHash);
-
-    const existingRelevantAction = payments.find(
-      (p) =>
-        p.status === LightningPaymentStatus.Success ||
-        p.status === LightningPaymentStatus.Pending ||
-        p.status === LightningPaymentStatus.PermanentFailure,
-    );
     if (existingRelevantAction === undefined) {
       return {
         payments,
@@ -151,6 +142,34 @@ class PendingPaymentTracker {
     };
   };
 
+  public getPaymentActions = async (
+    swap: Swap,
+  ): Promise<{
+    paymentHash: string;
+    payments: LightningPayment[];
+    existingRelevantAction: LightningPayment | undefined;
+  }> => {
+    const paymentHash = getHexString(
+      (await this.sidecar.decodeInvoiceOrOffer(swap.invoice!)).paymentHash!,
+    );
+
+    const payments =
+      await LightningPaymentRepository.findByPreimageHash(paymentHash);
+
+    const existingRelevantAction = payments.find(
+      (p) =>
+        p.status === LightningPaymentStatus.Success ||
+        p.status === LightningPaymentStatus.Pending ||
+        p.status === LightningPaymentStatus.PermanentFailure,
+    );
+
+    return {
+      payments,
+      paymentHash,
+      existingRelevantAction,
+    };
+  };
+
   public sendPayment = async (
     swap: Swap,
     lightningClient: LightningClient,
@@ -158,6 +177,7 @@ class PendingPaymentTracker {
     payments: LightningPayment[],
     cltvLimit?: number,
     timePreference?: number,
+    allowNewPayment = true,
   ): Promise<PaymentResponse | undefined> => {
     for (const status of [
       LightningPaymentStatus.Pending,
@@ -192,6 +212,10 @@ class PendingPaymentTracker {
             lightningClient.symbol,
           );
       }
+    }
+
+    if (!allowNewPayment) {
+      throw new NoExistingPaymentActionError();
     }
 
     await this.checkInvoiceTimeout(

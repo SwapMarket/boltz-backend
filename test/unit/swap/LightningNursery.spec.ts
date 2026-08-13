@@ -92,7 +92,7 @@ describe('LightningNursery', () => {
   const nursery = new LightningNursery(
     Logger.disabledLogger,
     sidecar,
-    new SelfPaymentClient(Logger.disabledLogger, {} as any),
+    new SelfPaymentClient(Logger.disabledLogger, {} as any, {} as any),
   );
 
   const btcLndClient = MockedLndClient();

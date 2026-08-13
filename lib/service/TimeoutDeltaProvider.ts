@@ -54,6 +54,10 @@ type PairTimeoutBlockDeltas = {
 class TimeoutDeltaProvider {
   public static readonly noRoutes = -1;
 
+  // Buffers to account for the block time drift between the two legs of a swap
+  public static readonly sameCurrencyBuffer = 15;
+  public static readonly crossChainBufferFactor = 0.25;
+
   // A map of the symbols of currencies and their block times in minutes
   public static blockTimes = new Map<string, number>([
     ['BTC', 10],
@@ -94,6 +98,14 @@ class TimeoutDeltaProvider {
   };
 
   public static minutesToSeconds = (minutes: number) => Math.ceil(minutes * 60);
+
+  public static addBuffer = (blocks: number, sameCurrency: boolean): number =>
+    blocks +
+    (sameCurrency
+      ? TimeoutDeltaProvider.sameCurrencyBuffer
+      : Math.ceil(
+          Math.max(blocks, 0) * TimeoutDeltaProvider.crossChainBufferFactor,
+        ));
 
   public init = (
     pairs: PairConfig[],
@@ -147,6 +159,53 @@ class TimeoutDeltaProvider {
     }
   };
 
+  public getBlocksLeft = async (
+    chainCurrency: Currency,
+    timeoutBlockHeight: number,
+    targetSymbol: string,
+  ): Promise<number> => {
+    if (
+      chainCurrency.type === CurrencyType.Ark &&
+      chainCurrency.arkNode?.usesLocktimeSeconds
+    ) {
+      const currentTimestamp = await chainCurrency.arkNode!.getBlockTimestamp(
+        await chainCurrency.arkNode!.getBlockHeight(),
+      );
+      return Math.floor(
+        (timeoutBlockHeight - currentTimestamp) /
+          // To minutes
+          60 /
+          // To blocks of the target currency
+          TimeoutDeltaProvider.blockTimes.get(targetSymbol)!,
+      );
+    }
+
+    let currentBlock: number;
+
+    switch (chainCurrency.type) {
+      case CurrencyType.Ark:
+        currentBlock = await chainCurrency.arkNode!.getBlockHeight();
+        break;
+
+      case CurrencyType.BitcoinLike:
+      case CurrencyType.Liquid:
+        currentBlock = (await chainCurrency.chainClient!.getBlockchainInfo())
+          .blocks;
+        break;
+
+      case CurrencyType.Ether:
+      case CurrencyType.ERC20:
+        currentBlock = await chainCurrency.provider!.getLocktimeHeight();
+        break;
+    }
+
+    return TimeoutDeltaProvider.convertBlocks(
+      chainCurrency.symbol,
+      targetSymbol,
+      timeoutBlockHeight - currentBlock,
+    );
+  };
+
   public getCltvLimit = async (swap: Swap): Promise<number> => {
     const { base, quote } = splitPairId(swap.pair);
     const chainCurrency = this.currencies.get(
@@ -159,49 +218,11 @@ class TimeoutDeltaProvider {
       false,
     );
 
-    let blocksLeft: number;
-
-    if (
-      chainCurrency.type === CurrencyType.Ark &&
-      chainCurrency.arkNode?.usesLocktimeSeconds
-    ) {
-      const currentTimestamp = await chainCurrency.arkNode!.getBlockTimestamp(
-        await chainCurrency.arkNode!.getBlockHeight(),
-      );
-      blocksLeft = Math.floor(
-        (swap.timeoutBlockHeight - currentTimestamp) /
-          // To minutes
-          60 /
-          // To blocks of the lightning currency, which is the unit the CLTV
-          // limit is denominated in
-          TimeoutDeltaProvider.blockTimes.get(lightningCurrency)!,
-      );
-    } else {
-      let currentBlock: number;
-
-      switch (chainCurrency.type) {
-        case CurrencyType.Ark:
-          currentBlock = await chainCurrency.arkNode!.getBlockHeight();
-          break;
-
-        case CurrencyType.BitcoinLike:
-        case CurrencyType.Liquid:
-          currentBlock = (await chainCurrency.chainClient!.getBlockchainInfo())
-            .blocks;
-          break;
-
-        case CurrencyType.Ether:
-        case CurrencyType.ERC20:
-          currentBlock = await chainCurrency.provider!.getLocktimeHeight();
-          break;
-      }
-
-      blocksLeft = TimeoutDeltaProvider.convertBlocks(
-        chainCurrency.symbol,
-        lightningCurrency,
-        swap.timeoutBlockHeight - currentBlock,
-      );
-    }
+    const blocksLeft = await this.getBlocksLeft(
+      chainCurrency,
+      swap.timeoutBlockHeight,
+      lightningCurrency,
+    );
 
     return Math.floor(blocksLeft - this.swapConfig.cltvDelta);
   };

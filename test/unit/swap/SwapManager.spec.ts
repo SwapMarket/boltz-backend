@@ -1032,6 +1032,30 @@ describe('SwapManager', () => {
     // Settlement should not be attempted because amounts don't match
     expect(mockAttemptSettleSwap).toHaveBeenCalledTimes(3);
 
+    // A recorded zero is present collateral and cannot be treated as if no
+    // lockup had been observed.
+    SwapRepository.getSwap = jest.fn().mockResolvedValue({
+      ...swap,
+      lockupTransactionId:
+        '1558d179d9e3de706997e3b6bb33f704a5b8086b27538fd04ef5e313467333b8',
+      status: SwapUpdateEvent.TransactionConfirmed,
+      expectedAmount: undefined,
+      onchainAmount: 0,
+    });
+
+    await expect(
+      manager.setSwapInvoice(
+        swap,
+        invoice,
+        Number.NaN,
+        fees,
+        true,
+        emitSwapInvoiceSet,
+      ),
+    ).rejects.toEqual(ServiceErrors.INVALID_INVOICE_AMOUNT(0));
+
+    expect(mockAttemptSettleSwap).toHaveBeenCalledTimes(3);
+
     // Swap that has already created a refund signature should throw error
     SwapRepository.getSwap = jest.fn().mockResolvedValue({
       ...swap,

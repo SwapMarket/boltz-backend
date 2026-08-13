@@ -34,6 +34,7 @@ import BalanceChecker from './BalanceChecker';
 import CommandHandler from './CommandHandler';
 import { Emojis } from './Markup';
 import type NotificationClient from './NotificationClient';
+import StuckClaimChecker from './StuckClaimChecker';
 
 // TODO: test balance and service alerts
 // TODO: use events instead of intervals to check connections and balances
@@ -42,6 +43,7 @@ class NotificationProvider {
   private static trailingWhitespace = '\n** **';
 
   private readonly balanceChecker: BalanceChecker;
+  private readonly stuckClaimChecker: StuckClaimChecker;
 
   private timer!: any;
   private disconnected = new Set<string>();
@@ -68,6 +70,8 @@ class NotificationProvider {
       currencies,
       tokenConfigs,
     );
+
+    this.stuckClaimChecker = new StuckClaimChecker(this.logger, this.client);
   }
 
   public init = async (): Promise<void> => {
@@ -122,6 +126,7 @@ class NotificationProvider {
         await Promise.all([
           this.checkConnections(),
           this.balanceChecker.check(),
+          this.stuckClaimChecker.check(),
         ]);
       };
 

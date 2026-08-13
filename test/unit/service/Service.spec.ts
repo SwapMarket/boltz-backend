@@ -55,7 +55,9 @@ import type { WebHookData } from '../../../lib/service/Service';
 import Service, {
   cancelledViaCliFailureReason,
 } from '../../../lib/service/Service';
-import { InvoiceType } from '../../../lib/sidecar/DecodedInvoice';
+import DecodedInvoice, {
+  InvoiceType,
+} from '../../../lib/sidecar/DecodedInvoice';
 import type Sidecar from '../../../lib/sidecar/Sidecar';
 import NodeSwitch from '../../../lib/swap/NodeSwitch';
 import OverpaymentProtector from '../../../lib/swap/OverpaymentProtector';
@@ -2549,12 +2551,8 @@ describe('Service', () => {
       message: 'error thrown by Service',
     };
 
-    const mockDestroySwap = jest.fn().mockResolvedValue({});
+    SwapRepository.destroyPristine = jest.fn().mockResolvedValue(true);
     service['setSwapInvoice'] = jest.fn().mockImplementation(async () => {
-      mockGetSwapResult = {
-        destroy: mockDestroySwap,
-      };
-
       throw error;
     });
 
@@ -2562,7 +2560,10 @@ describe('Service', () => {
       service.createSwapWithInvoice(pair, orderSide, refundPublicKey, invoice),
     ).rejects.toEqual(error);
 
-    expect(mockDestroySwap).toHaveBeenCalledTimes(1);
+    expect(SwapRepository.destroyPristine).toHaveBeenCalledTimes(1);
+    expect(SwapRepository.destroyPristine).toHaveBeenCalledWith(
+      createSwapResult.id,
+    );
 
     // Throw if swap with invoice exists already
     mockGetSwapResult = {};
@@ -2579,15 +2580,14 @@ describe('Service', () => {
       address: 'bcrt1qundqmnml8644l23g7cr3fjnksks4nc6mxf4gk9',
     };
     const error = { message: 'setSwapInvoice failed' };
-    const mockDestroySwap = jest.fn().mockResolvedValue({});
 
     service.createSwap = jest.fn().mockResolvedValue(createdSwap);
     service['setSwapInvoice'] = jest.fn().mockRejectedValue(error);
     sidecar.deleteWebHook = jest.fn().mockResolvedValue(undefined);
+    SwapRepository.destroyPristine = jest.fn().mockResolvedValue(true);
 
-    // 1: no existing swap for the invoice, 2: arg for setSwapInvoice,
-    // 3: swap fetched in the catch block for cleanup
-    mockGetSwapResult = [undefined, {}, { destroy: mockDestroySwap }];
+    // 1: no existing swap for the invoice, 2: arg for setSwapInvoice
+    mockGetSwapResult = [undefined, {}];
 
     const invoice =
       'lnbcrt1m1p0xdry7pp5jadnlr9y5qs5nl93u06v9w2azqr8rf5n09u2wk0c6jktyfxwfpwqdqqcqzpgsp5svss08dmgw9q6emmwfzp74hcs2rq2fu3u78qge5l942al5glzjmq9qy9qsq4v5x0qlfp3fvpm9mrzmmdrptwdrd7gxyaypz4y0g8l8apmzfjgvqtxg9z89y0kg2lh6ykd8czt5ven6nlvr407vdm0mp9l9tvhg33gspv3yr0j';
@@ -2612,9 +2612,51 @@ describe('Service', () => {
       ),
     ).rejects.toEqual(error);
 
-    expect(mockDestroySwap).toHaveBeenCalledTimes(1);
+    expect(SwapRepository.destroyPristine).toHaveBeenCalledTimes(1);
+    expect(SwapRepository.destroyPristine).toHaveBeenCalledWith(createdSwap.id);
     expect(sidecar.deleteWebHook).toHaveBeenCalledTimes(1);
     expect(sidecar.deleteWebHook).toHaveBeenCalledWith(createdSwap.id);
+  });
+
+  test('should keep the swap and its webhook when it is not pristine anymore', async () => {
+    const createdSwap = {
+      id: 'swapInvoice',
+      referralId: 'asdf',
+      address: 'bcrt1qundqmnml8644l23g7cr3fjnksks4nc6mxf4gk9',
+    };
+    const error = { message: 'setSwapInvoice failed' };
+
+    service.createSwap = jest.fn().mockResolvedValue(createdSwap);
+    service['setSwapInvoice'] = jest.fn().mockRejectedValue(error);
+    sidecar.deleteWebHook = jest.fn().mockResolvedValue(undefined);
+    SwapRepository.destroyPristine = jest.fn().mockResolvedValue(false);
+
+    mockGetSwapResult = [undefined, {}];
+
+    const invoice =
+      'lnbcrt1m1p0xdry7pp5jadnlr9y5qs5nl93u06v9w2azqr8rf5n09u2wk0c6jktyfxwfpwqdqqcqzpgsp5svss08dmgw9q6emmwfzp74hcs2rq2fu3u78qge5l942al5glzjmq9qy9qsq4v5x0qlfp3fvpm9mrzmmdrptwdrd7gxyaypz4y0g8l8apmzfjgvqtxg9z89y0kg2lh6ykd8czt5ven6nlvr407vdm0mp9l9tvhg33gspv3yr0j';
+
+    await expect(
+      service.createSwapWithInvoice(
+        'BTC/BTC',
+        'sell',
+        getHexBuffer(
+          '02d3727f1c2017adf58295378d02ace4c514666b8d75d4751940b940718ceb34ed',
+        ),
+        invoice,
+        undefined,
+        undefined,
+        SwapVersion.Legacy,
+        undefined,
+        {
+          url: 'http',
+          hashSwapId: true,
+        },
+      ),
+    ).rejects.toEqual(error);
+
+    expect(SwapRepository.destroyPristine).toHaveBeenCalledTimes(1);
+    expect(sidecar.deleteWebHook).not.toHaveBeenCalled();
   });
 
   test('should create reverse swaps', async () => {
@@ -3522,13 +3564,22 @@ describe('Service', () => {
   });
 
   describe('createReverseSwap BOLT12', () => {
+    const bolt12Invoice = (cltvExpiryDeltas: number[]) =>
+      new DecodedInvoice({
+        isExpired: false,
+        bolt12Invoice: {
+          features: [],
+          msat: '100000000',
+          paymentHash: randomBytes(32),
+          paths: cltvExpiryDeltas.map((delta) => ({
+            cltvExpiryDelta: delta.toString(),
+          })),
+        },
+      } as any);
+
     test('should create reverse swaps with bolt12 invoices', async () => {
-      const paymentHash = randomBytes(32);
-      const decodedInvoice = {
-        type: InvoiceType.Bolt12Invoice,
-        paymentHash,
-        amountMsat: 100_000_000,
-      } as any;
+      const decodedInvoice = bolt12Invoice([16]);
+      const paymentHash = decodedInvoice.paymentHash!;
       service.sidecar.decodeInvoiceOrOffer = jest
         .fn()
         .mockResolvedValue(decodedInvoice);
@@ -3559,9 +3610,63 @@ describe('Service', () => {
         holdInvoiceAmount: 100000,
         version: SwapVersion.Legacy,
         invoice: { invoice, decoded: decodedInvoice },
-        onchainTimeoutBlockDelta: expect.anything(),
-        lightningTimeoutBlockDelta: expect.anything(),
+        onchainTimeoutBlockDelta: 1,
+        lightningTimeoutBlockDelta: 16,
       });
+    });
+
+    test('should throw if the bolt12 invoice CLTV is too small', async () => {
+      service.sidecar.decodeInvoiceOrOffer = jest
+        .fn()
+        .mockResolvedValue(bolt12Invoice([15]));
+
+      await expect(
+        service.createReverseSwap({
+          invoice: 'lni',
+          orderSide: 'buy',
+          pairId: 'BTC/BTC',
+          claimPublicKey: getHexBuffer('0xfff'),
+          version: SwapVersion.Legacy,
+        } as any),
+      ).rejects.toEqual(Errors.INVOICE_CLTV_TOO_SMALL(15, 16));
+
+      expect(mockCreateReverseSwap).not.toHaveBeenCalled();
+    });
+
+    test('should reject a bolt12 invoice advertising any path below the required CLTV', async () => {
+      service.sidecar.decodeInvoiceOrOffer = jest
+        .fn()
+        .mockResolvedValue(bolt12Invoice([160, 10]));
+
+      await expect(
+        service.createReverseSwap({
+          invoice: 'lni',
+          orderSide: 'buy',
+          pairId: 'BTC/BTC',
+          claimPublicKey: getHexBuffer('0xfff'),
+          version: SwapVersion.Legacy,
+        } as any),
+      ).rejects.toEqual(Errors.INVOICE_CLTV_TOO_SMALL(10, 16));
+
+      expect(mockCreateReverseSwap).not.toHaveBeenCalled();
+    });
+
+    test('should require the cross chain lightning timeout delta as bolt12 invoice CLTV', async () => {
+      service.sidecar.decodeInvoiceOrOffer = jest
+        .fn()
+        .mockResolvedValue(bolt12Invoice([49]));
+
+      await expect(
+        service.createReverseSwap({
+          invoice: 'lni',
+          orderSide: 'buy',
+          pairId: 'LTC/BTC',
+          claimPublicKey: getHexBuffer('0xfff'),
+          version: SwapVersion.Legacy,
+        } as any),
+      ).rejects.toEqual(Errors.INVOICE_CLTV_TOO_SMALL(49, 50));
+
+      expect(mockCreateReverseSwap).not.toHaveBeenCalled();
     });
 
     test('should remove the webhook when reverse swap creation fails', async () => {

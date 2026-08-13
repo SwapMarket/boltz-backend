@@ -213,4 +213,8 @@ export default {
     message: 'could not register webhook',
     code: concatErrorCode(ErrorCodePrefix.Service, 59),
   }),
+  INVOICE_CLTV_TOO_SMALL: (actual: number, required: number): Error => ({
+    message: `invoice CLTV ${actual} is smaller than the required ${required}`,
+    code: concatErrorCode(ErrorCodePrefix.Service, 60),
+  }),
 };

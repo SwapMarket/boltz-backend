@@ -13,6 +13,8 @@ import {
 } from '../Utils';
 import { SwapUpdateEvent } from '../consts/Enums';
 import type { AnySwap } from '../consts/Types';
+import { LightningPaymentStatus } from '../db/models/LightningPayment';
+import type LightningPayment from '../db/models/LightningPayment';
 import type ReverseSwap from '../db/models/ReverseSwap';
 import type Swap from '../db/models/Swap';
 import type { ChainSwapInfo } from '../db/repositories/ChainSwapRepository';
@@ -23,6 +25,7 @@ import type {
   PaymentResponse,
 } from '../lightning/LightningClient';
 import LndClient from '../lightning/LndClient';
+import NoExistingPaymentActionError from '../lightning/NoExistingPaymentActionError';
 import type PendingPaymentTracker from '../lightning/PendingPaymentTracker';
 import SelfPaymentClient from '../lightning/SelfPaymentClient';
 import ClnClient from '../lightning/cln/ClnClient';
@@ -133,10 +136,17 @@ class PaymentHandler {
     private readonly swapNursery: SwapNursery,
     private readonly sendApprovalHook: SendApprovalHook,
   ) {
-    this.selfPaymentClient = new SelfPaymentClient(this.logger, swapNursery);
+    this.selfPaymentClient = new SelfPaymentClient(
+      this.logger,
+      swapNursery,
+      this.timeoutDeltaProvider,
+    );
   }
 
-  public payInvoice = async (swap: Swap): Promise<Buffer | undefined> => {
+  public payInvoice = async (
+    swap: Swap,
+    allowNewPayment = true,
+  ): Promise<Buffer | undefined> => {
     this.logger.verbose(`Paying invoice of Swap ${swap.id}`);
 
     if (swap.status !== SwapUpdateEvent.InvoicePending) {
@@ -163,6 +173,25 @@ class PaymentHandler {
 
     const lightningCurrency = this.currencies.get(lightningSymbol)!;
 
+    if (!allowNewPayment) {
+      const { payments, existingRelevantAction } =
+        await this.pendingPaymentTracker.getPaymentActions(swap);
+      const selfPayment = await this.attemptSelfPayment(
+        swap,
+        decoded,
+        cltvLimit,
+        payments,
+        false,
+      );
+      if (selfPayment.handled) {
+        return selfPayment.preimage;
+      }
+
+      if (existingRelevantAction === undefined) {
+        throw new NoExistingPaymentActionError();
+      }
+    }
+
     const preferredNode = await this.getPreferredNode(
       lightningCurrency,
       swap,
@@ -185,25 +214,18 @@ class PaymentHandler {
         Signer.SIGNER_SUBMARINE_INVOICE_PAYMENT,
       );
 
-    try {
-      const res = await this.selfPaymentClient.handleSelfPayment(
+    if (allowNewPayment) {
+      const selfPayment = await this.attemptSelfPayment(
         swap,
         decoded,
         cltvLimit,
         payments,
       );
-      if (res.isSelf) {
-        if (res.result !== undefined) {
-          return await this.settleInvoice(swap, res.result);
-        }
-
-        return undefined;
+      if (selfPayment.handled) {
+        return selfPayment.preimage;
       }
-    } catch (error) {
-      const msg = formatError(error);
-      this.logPaymentFailure(swap, msg);
-      await this.abandonSwap(swap, msg);
-      return undefined;
+    } else if (existingRelevantAction === undefined) {
+      throw new NoExistingPaymentActionError();
     }
 
     if (
@@ -243,7 +265,10 @@ class PaymentHandler {
     }
 
     try {
-      if (cltvLimit < 2) {
+      if (
+        cltvLimit < 2 &&
+        !payments.some((p) => p.status === LightningPaymentStatus.Success)
+      ) {
         throw PaymentHandler.errCltvTooSmall;
       }
 
@@ -257,16 +282,55 @@ class PaymentHandler {
         payments,
         cltvLimit,
         preferredNode?.timePreference,
+        allowNewPayment,
       );
 
       if (payResponse !== undefined) {
         return await this.settleInvoice(swap, payResponse);
       }
     } catch (error) {
+      if (error instanceof NoExistingPaymentActionError) {
+        throw error;
+      }
+
       return this.handlePaymentFailure(swap, node, error);
     }
 
     return undefined;
+  };
+
+  private attemptSelfPayment = async (
+    swap: Swap,
+    decoded: DecodedInvoice,
+    cltvLimit: number,
+    payments: LightningPayment[],
+    allowNewPayment = true,
+  ): Promise<{ handled: boolean; preimage?: Buffer }> => {
+    try {
+      const res = await this.selfPaymentClient.handleSelfPayment(
+        swap,
+        decoded,
+        cltvLimit,
+        payments,
+        allowNewPayment,
+      );
+      if (!res.isSelf) {
+        return { handled: false };
+      }
+
+      return {
+        handled: true,
+        preimage:
+          res.result === undefined
+            ? undefined
+            : await this.settleInvoice(swap, res.result),
+      };
+    } catch (error) {
+      const msg = formatError(error);
+      this.logPaymentFailure(swap, msg);
+      await this.abandonSwap(swap, msg);
+      return { handled: true };
+    }
   };
 
   private handlePaymentFailure = async (

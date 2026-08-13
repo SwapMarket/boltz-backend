@@ -1,6 +1,7 @@
 import { randomBytes } from 'crypto';
 import Logger from '../../../lib/Logger';
 import {
+  getHexBuffer,
   getHexString,
   minutesToMilliseconds,
   secondsToMilliseconds,
@@ -13,6 +14,7 @@ import LightningPaymentRepository from '../../../lib/db/repositories/LightningPa
 import ReferralRepository from '../../../lib/db/repositories/ReferralRepository';
 import LightningErrors from '../../../lib/lightning/Errors';
 import type { LightningClient } from '../../../lib/lightning/LightningClient';
+import NoExistingPaymentActionError from '../../../lib/lightning/NoExistingPaymentActionError';
 import PendingPaymentTracker from '../../../lib/lightning/PendingPaymentTracker';
 import type ClnPendingPaymentTracker from '../../../lib/lightning/paymentTrackers/ClnPendingPaymentTracker';
 
@@ -153,6 +155,164 @@ describe('PendingPaymentTracker', () => {
     });
   });
 
+  describe('sendPayment with an already succeeded payment', () => {
+    const preimage = randomBytes(32);
+    const preimageHash = getHexString(randomBytes(32));
+
+    const swap = { id: 'swap-id', invoice: 'invoice' } as unknown as Swap;
+
+    const payments = [
+      {
+        preimageHash,
+        nodeId: 'lnd-1',
+        status: LightningPaymentStatus.Success,
+      },
+    ] as LightningPayment[];
+
+    const nodeThatPaid = {
+      id: 'lnd-1',
+      symbol: 'BTC',
+      type: NodeType.LND,
+      sendPayment: jest.fn(),
+      trackPayment: jest.fn().mockResolvedValue({
+        feeMsat: 21,
+        paymentPreimage: getHexString(preimage),
+      }),
+    } as unknown as LightningClient;
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+      LightningPaymentRepository.create = jest.fn();
+      tracker['lightningNodes'].set(
+        'BTC',
+        new Map([[nodeThatPaid.id, nodeThatPaid]]),
+      );
+    });
+
+    test('should recover the preimage without paying again', async () => {
+      const res = await tracker.sendPayment(
+        swap,
+        nodeThatPaid,
+        preimageHash,
+        payments,
+      );
+
+      expect(res).toEqual({ feeMsat: 21, preimage });
+      expect(nodeThatPaid.sendPayment).not.toHaveBeenCalled();
+      expect(LightningPaymentRepository.create).not.toHaveBeenCalled();
+    });
+
+    test('should return undefined when the node that paid is not available', async () => {
+      tracker['lightningNodes'].set('BTC', new Map());
+
+      await expect(
+        tracker.sendPayment(swap, nodeThatPaid, preimageHash, payments),
+      ).resolves.toBeUndefined();
+    });
+  });
+
+  describe('sendPayment recovery authorization', () => {
+    const swap = {
+      id: 'recovery-only',
+      invoice: 'lnbcrt1',
+    } as unknown as Swap;
+    const lightningClient = {
+      id: 'lnd-1',
+      type: NodeType.LND,
+      symbol: 'BTC',
+    } as unknown as LightningClient;
+    const paymentHash = getHexString(randomBytes(32));
+
+    let sendPaymentWithNode: jest.SpyInstance;
+
+    beforeEach(() => {
+      sendPaymentWithNode = jest
+        .spyOn(tracker as any, 'sendPaymentWithNode')
+        .mockResolvedValue(undefined);
+    });
+
+    afterEach(() => {
+      sendPaymentWithNode.mockRestore();
+    });
+
+    test.each([
+      ['no payment rows', []],
+      [
+        'only a temporary failure',
+        [{ status: LightningPaymentStatus.TemporaryFailure }],
+      ],
+    ])(
+      'should not create a payment in recovery-only mode with %s',
+      async (_name, payments) => {
+        await expect(
+          tracker.sendPayment(
+            swap,
+            lightningClient,
+            paymentHash,
+            payments as LightningPayment[],
+            undefined,
+            undefined,
+            false,
+          ),
+        ).rejects.toBeInstanceOf(NoExistingPaymentActionError);
+
+        expect(sendPaymentWithNode).not.toHaveBeenCalled();
+      },
+    );
+
+    test('should preserve recovery of a pending payment', async () => {
+      await expect(
+        tracker.sendPayment(
+          swap,
+          lightningClient,
+          paymentHash,
+          [
+            {
+              status: LightningPaymentStatus.Pending,
+              nodeId: lightningClient.id,
+            } as LightningPayment,
+          ],
+          undefined,
+          undefined,
+          false,
+        ),
+      ).resolves.toBeUndefined();
+
+      expect(sendPaymentWithNode).not.toHaveBeenCalled();
+    });
+
+    test('should preserve recovery of a successful payment', async () => {
+      const response = {
+        feeMsat: 21,
+        preimage: randomBytes(32),
+      };
+      const getSuccessfulPaymentDetails = jest
+        .spyOn(tracker as any, 'getSuccessfulPaymentDetails')
+        .mockResolvedValue(response);
+
+      await expect(
+        tracker.sendPayment(
+          swap,
+          lightningClient,
+          paymentHash,
+          [
+            {
+              status: LightningPaymentStatus.Success,
+              nodeId: lightningClient.id,
+            } as LightningPayment,
+          ],
+          undefined,
+          undefined,
+          false,
+        ),
+      ).resolves.toEqual(response);
+
+      expect(getSuccessfulPaymentDetails).toHaveBeenCalledTimes(1);
+      expect(sendPaymentWithNode).not.toHaveBeenCalled();
+      getSuccessfulPaymentDetails.mockRestore();
+    });
+  });
+
   describe('sendPaymentWithNode', () => {
     const lightningClient = {
       id: 'lnd-1',
@@ -280,6 +440,128 @@ describe('PendingPaymentTracker', () => {
         tracker.lightningTrackers[NodeType.CLN].watchPayment,
       ).toHaveBeenCalledWith(clnClient, swap.invoice, preimageHash);
     });
+  });
+
+  describe('sendPayment', () => {
+    const preimage = randomBytes(32);
+    const preimageHash = getHexString(randomBytes(32));
+
+    const swap = {
+      id: 'swapId',
+      pair: 'BTC/BTC',
+      invoice: 'lnbcrt1',
+    } as unknown as Swap;
+
+    const clnClient = {
+      id: 'cln-1',
+      symbol: 'BTC',
+      type: NodeType.CLN,
+      sendPayment: jest.fn(),
+      checkPayStatus: jest.fn().mockResolvedValue({ feeMsat: 21, preimage }),
+    } as unknown as LightningClient;
+
+    const lndClient = {
+      id: 'lnd-1',
+      symbol: 'BTC',
+      type: NodeType.LND,
+      sendPayment: jest.fn(),
+      trackPayment: jest.fn().mockResolvedValue({
+        feeMsat: '42',
+        paymentPreimage: getHexString(preimage),
+      }),
+    } as unknown as LightningClient;
+
+    const payment = (
+      status: LightningPaymentStatus,
+      nodeId: string = clnClient.id,
+      error?: string,
+    ) => ({ status, nodeId, error }) as LightningPayment;
+
+    beforeEach(() => {
+      LightningPaymentRepository.create = jest.fn();
+      LightningPaymentRepository.setStatus = jest.fn();
+      tracker['lightningNodes'].set(
+        'BTC',
+        new Map([
+          [clnClient.id, clnClient],
+          [lndClient.id, lndClient],
+        ]),
+      );
+    });
+
+    test('should resolve the preimage of a successful CLN payment', async () => {
+      await expect(
+        tracker.sendPayment(swap, clnClient, preimageHash, [
+          payment(LightningPaymentStatus.Success),
+        ]),
+      ).resolves.toEqual({ feeMsat: 21, preimage });
+
+      expect((clnClient as any).checkPayStatus).toHaveBeenCalledTimes(1);
+      expect((clnClient as any).checkPayStatus).toHaveBeenCalledWith(
+        swap.invoice,
+      );
+    });
+
+    test('should resolve the preimage of a successful LND payment', async () => {
+      await expect(
+        tracker.sendPayment(swap, lndClient, preimageHash, [
+          payment(LightningPaymentStatus.Success, lndClient.id),
+        ]),
+      ).resolves.toEqual({ feeMsat: 42, preimage });
+
+      expect((lndClient as any).trackPayment).toHaveBeenCalledTimes(1);
+      expect((lndClient as any).trackPayment).toHaveBeenCalledWith(
+        getHexBuffer(preimageHash),
+      );
+    });
+
+    test('should prefer a pending payment over a successful one', async () => {
+      await expect(
+        tracker.sendPayment(swap, clnClient, preimageHash, [
+          payment(LightningPaymentStatus.Success),
+          payment(LightningPaymentStatus.Pending),
+        ]),
+      ).resolves.toBeUndefined();
+
+      expect((clnClient as any).checkPayStatus).not.toHaveBeenCalled();
+    });
+
+    test('should not resolve a successful payment of an unavailable node', async () => {
+      await expect(
+        tracker.sendPayment(swap, clnClient, preimageHash, [
+          payment(LightningPaymentStatus.Success, 'gone'),
+        ]),
+      ).resolves.toBeUndefined();
+
+      expect((clnClient as any).checkPayStatus).not.toHaveBeenCalled();
+    });
+
+    test('should rethrow the stored error of a permanently failed payment', async () => {
+      const error = 'incorrect payment details';
+
+      await expect(
+        tracker.sendPayment(swap, clnClient, preimageHash, [
+          payment(LightningPaymentStatus.PermanentFailure, clnClient.id, error),
+        ]),
+      ).rejects.toEqual(error);
+    });
+
+    test.each`
+      status
+      ${LightningPaymentStatus.Pending}
+      ${LightningPaymentStatus.Success}
+      ${LightningPaymentStatus.PermanentFailure}
+    `(
+      'should never start a new payment when a $status one exists',
+      async ({ status }) => {
+        await tracker
+          .sendPayment(swap, clnClient, preimageHash, [payment(status)], 1)
+          .catch(() => {});
+
+        expect(clnClient.sendPayment).not.toHaveBeenCalled();
+        expect(LightningPaymentRepository.create).not.toHaveBeenCalled();
+      },
+    );
   });
 
   describe('checkInvoiceTimeout', () => {

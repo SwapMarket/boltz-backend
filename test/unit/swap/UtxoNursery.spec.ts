@@ -2451,6 +2451,13 @@ describe('UtxoNursery', () => {
         expectedError: Errors.INCORRECT_ASSET_SENT(),
       },
       {
+        testName:
+          'INCORRECT_ASSET_SENT when deferred expectedAmount is undefined',
+        expectedAmount: undefined,
+        outputValue: 0,
+        expectedError: Errors.INCORRECT_ASSET_SENT(),
+      },
+      {
         testName: 'INSUFFICIENT_AMOUNT when outputValue is less than expected',
         expectedAmount: 100214,
         outputValue: 50000,

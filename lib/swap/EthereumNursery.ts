@@ -34,6 +34,10 @@ import SwapRepository from '../db/repositories/SwapRepository';
 import type Wallet from '../wallet/Wallet';
 import type WalletManager from '../wallet/WalletManager';
 import type EthereumManager from '../wallet/ethereum/EthereumManager';
+import {
+  queryERC20SwapValuesFromLock,
+  queryEtherSwapValuesFromLock,
+} from '../wallet/ethereum/contracts/ContractUtils';
 import type ERC20WalletProvider from '../wallet/providers/ERC20WalletProvider';
 import { shouldIgnoreCompetingLockup } from './CompetingLockup';
 import Errors from './Errors';
@@ -187,10 +191,57 @@ class EthereumNursery extends TypedEventEmitter<{
     swap.status === SwapUpdateEvent.TransactionLockupFailed &&
     (outcome === LockupWriteOutcome.Acquired || swap.failureReason == null);
 
+  private validateClaimable = async (
+    swap: Swap | ChainSwapInfo,
+    transactionHash: string,
+    logIndex: number,
+    isEtherSwap: boolean,
+  ): Promise<string | undefined> => {
+    const lockupAddress =
+      swap.type === SwapType.Submarine
+        ? (swap as Swap).lockupAddress
+        : (swap as ChainSwapInfo).receivingData.lockupAddress;
+    const contracts =
+      await this.ethereumManager.contractsForAddress(lockupAddress);
+    if (contracts === undefined) {
+      return Errors.UNCLAIMABLE_LOCKUP(transactionHash, logIndex).message;
+    }
+
+    try {
+      if (isEtherSwap) {
+        await queryEtherSwapValuesFromLock(
+          swap,
+          this.ethereumManager.provider,
+          contracts.etherSwap,
+          transactionHash,
+          true,
+          logIndex,
+        );
+      } else {
+        await queryERC20SwapValuesFromLock(
+          swap,
+          this.ethereumManager.provider,
+          contracts.erc20Swap,
+          transactionHash,
+          true,
+          logIndex,
+        );
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Lockup ${transactionHash}:${logIndex} of ${swapTypeToPrettyString(swap.type)} Swap ${swap.id} cannot be claimed: ${formatError(error)}`,
+      );
+      return Errors.UNCLAIMABLE_LOCKUP(transactionHash, logIndex).message;
+    }
+
+    return undefined;
+  };
+
   private validateEtherSwapLockup = async (
     swap: Swap | ChainSwapInfo,
     transaction: Transaction | TransactionResponse,
     etherSwapValues: EtherSwapValues,
+    logIndex: number,
   ): Promise<string | undefined> => {
     if (etherSwapValues.claimAddress !== this.ethereumManager.address) {
       return Errors.INVALID_CLAIM_ADDRESS(
@@ -212,10 +263,13 @@ class EthereumNursery extends TypedEventEmitter<{
       ).message;
     }
 
+    const actualAmountSat = Number(etherSwapValues.amount / etherDecimals);
+    if (actualAmountSat <= 0) {
+      return Errors.INSUFFICIENT_AMOUNT(actualAmountSat, 1).message;
+    }
+
     const expectedAmount = this.getSwapExpectedReceivingAmount(swap);
     if (this.shouldValidateAmount(swap, expectedAmount)) {
-      const actualAmountSat = Number(etherSwapValues.amount / etherDecimals);
-
       if (
         BigInt(expectedAmount) * this.ethereumManager.networkDetails.decimals >
         etherSwapValues.amount
@@ -233,6 +287,16 @@ class EthereumNursery extends TypedEventEmitter<{
       ) {
         return Errors.OVERPAID_AMOUNT(actualAmountSat, expectedAmount).message;
       }
+    }
+
+    const unclaimable = await this.validateClaimable(
+      swap,
+      transaction.hash!,
+      logIndex,
+      true,
+    );
+    if (unclaimable !== undefined) {
+      return unclaimable;
     }
 
     const action = await this.transactionHook.hook(
@@ -385,7 +449,12 @@ class EthereumNursery extends TypedEventEmitter<{
       lockupAmount: Number(etherSwapValues.amount / etherDecimals),
       refundAddress: etherSwapValues.refundAddress,
       validate: () =>
-        this.validateEtherSwapLockup(swap, transaction, etherSwapValues),
+        this.validateEtherSwapLockup(
+          swap,
+          transaction,
+          etherSwapValues,
+          logIndex,
+        ),
       emitLockup: (updated) => {
         this.emit('eth.lockup', {
           swap: updated,
@@ -403,6 +472,7 @@ class EthereumNursery extends TypedEventEmitter<{
     erc20SwapValues: ERC20SwapValues,
     symbol: string,
     erc20Wallet: ERC20WalletProvider,
+    logIndex: number,
   ): Promise<string | undefined> => {
     if (erc20SwapValues.claimAddress !== this.ethereumManager.address) {
       return Errors.INVALID_CLAIM_ADDRESS(
@@ -431,12 +501,15 @@ class EthereumNursery extends TypedEventEmitter<{
       ).message;
     }
 
+    const actualAmount = erc20Wallet.normalizeTokenAmount(
+      erc20SwapValues.amount,
+    );
+    if (actualAmount <= 0) {
+      return Errors.INSUFFICIENT_AMOUNT(actualAmount, 1).message;
+    }
+
     const expectedAmount = this.getSwapExpectedReceivingAmount(swap);
     if (this.shouldValidateAmount(swap, expectedAmount)) {
-      const actualAmount = erc20Wallet.normalizeTokenAmount(
-        erc20SwapValues.amount,
-      );
-
       if (
         erc20Wallet.formatTokenAmount(expectedAmount) > erc20SwapValues.amount
       ) {
@@ -452,6 +525,16 @@ class EthereumNursery extends TypedEventEmitter<{
       ) {
         return Errors.OVERPAID_AMOUNT(actualAmount, expectedAmount).message;
       }
+    }
+
+    const unclaimable = await this.validateClaimable(
+      swap,
+      transaction.hash!,
+      logIndex,
+      false,
+    );
+    if (unclaimable !== undefined) {
+      return unclaimable;
     }
 
     const action = await this.transactionHook.hook(
@@ -501,6 +584,7 @@ class EthereumNursery extends TypedEventEmitter<{
           erc20SwapValues,
           wallet.symbol,
           erc20Wallet,
+          logIndex,
         ),
       emitLockup: (updated) => {
         this.emit('erc20.lockup', {

@@ -112,11 +112,20 @@ const querySwapValuesFromLock = async <T extends { preimageHash: Buffer }>(
       return lockupsFound;
     };
 
+    const hasLockupAtIndex = (index: number) =>
+      lockTransactionReceipt.logs.some(
+        (log) =>
+          log.index === index &&
+          log.topics[0] === topicHash &&
+          log.address.toLowerCase() === contractAddress,
+      );
+
     let lockupsFound = await findLockups(logIndex);
     if (
       lockupsFound.length === 0 &&
       logIndex !== undefined &&
-      identifier !== undefined
+      identifier !== undefined &&
+      !('lockupHash' in identifier && hasLockupAtIndex(logIndex))
     ) {
       logger?.warn(
         `Recorded log index ${logIndex} of lockup transaction ${lockTransactionHash} did not resolve; falling back to searching the whole receipt`,

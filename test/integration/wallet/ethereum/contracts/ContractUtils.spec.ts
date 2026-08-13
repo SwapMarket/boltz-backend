@@ -359,6 +359,151 @@ describe('ContractUtils', () => {
         Errors.INVALID_LOCKUP_TRANSACTION(etherSwapLockTransactionHash),
       );
     });
+
+    describe('commitment next to another lockup in one transaction', () => {
+      const commitmentPreimageHash = Buffer.alloc(32);
+      const twoLockupTransactionHash = '0xtwoLockups';
+
+      const twoLockupProvider = async () => {
+        const address = await etherSwap.getAddress();
+        const logs = [preimageHash, commitmentPreimageHash].map((hash, i) => {
+          const encoded = etherSwap.interface.encodeEventLog('Lockup', [
+            hash,
+            etherSwapValues.amount,
+            etherSwapValues.claimAddress,
+            etherSwapValues.refundAddress,
+            etherSwapValues.timelock,
+          ]);
+          return {
+            address,
+            topics: encoded.topics,
+            data: encoded.data,
+            index: i + 1,
+          };
+        });
+
+        return {
+          getTransactionReceipt: async () => ({ logs }),
+        } as any;
+      };
+
+      beforeEach(async () => {
+        getBySwapIdSpy.mockResolvedValue({
+          lockupHash: await computeLockupHash(etherSwap, {
+            preimageHash: commitmentPreimageHash,
+            amount: etherSwapValues.amount,
+            claimAddress: etherSwapValues.claimAddress,
+            refundAddress: etherSwapValues.refundAddress,
+            timelock: BigInt(etherSwapValues.timelock),
+          }),
+        } as any);
+      });
+
+      test('should resolve the commitment at the recorded logIndex', async () => {
+        const logger = { warn: jest.fn() } as unknown as Logger;
+
+        const values = await queryEtherSwapValuesFromLock(
+          swap,
+          await twoLockupProvider(),
+          etherSwap,
+          twoLockupTransactionHash,
+          true,
+          2,
+          logger,
+        );
+
+        expect(values.preimageHash).toEqual(commitmentPreimageHash);
+        expect(logger.warn).not.toHaveBeenCalled();
+      });
+
+      test('should not fall back when another lockup occupies the recorded logIndex', async () => {
+        const logger = { warn: jest.fn() } as unknown as Logger;
+
+        await expect(
+          queryEtherSwapValuesFromLock(
+            swap,
+            await twoLockupProvider(),
+            etherSwap,
+            twoLockupTransactionHash,
+            true,
+            1,
+            logger,
+          ),
+        ).rejects.toEqual(
+          Errors.INVALID_LOCKUP_TRANSACTION(twoLockupTransactionHash),
+        );
+
+        expect(logger.warn).not.toHaveBeenCalled();
+      });
+
+      test('should not fall back for ERC20Swap when another lockup occupies the recorded logIndex', async () => {
+        const logger = { warn: jest.fn() } as unknown as Logger;
+
+        const address = await erc20Swap.getAddress();
+        const logs = [preimageHash, commitmentPreimageHash].map((hash, i) => {
+          const encoded = erc20Swap.interface.encodeEventLog('Lockup', [
+            hash,
+            erc20SwapValues.amount,
+            erc20SwapValues.tokenAddress,
+            erc20SwapValues.claimAddress,
+            erc20SwapValues.refundAddress,
+            erc20SwapValues.timelock,
+          ]);
+          return {
+            address,
+            topics: encoded.topics,
+            data: encoded.data,
+            index: i + 1,
+          };
+        });
+
+        getBySwapIdSpy.mockResolvedValue({
+          lockupHash: await computeLockupHash(erc20Swap, {
+            preimageHash: commitmentPreimageHash,
+            amount: erc20SwapValues.amount,
+            tokenAddress: erc20SwapValues.tokenAddress,
+            claimAddress: erc20SwapValues.claimAddress,
+            refundAddress: erc20SwapValues.refundAddress,
+            timelock: BigInt(erc20SwapValues.timelock),
+          }),
+        } as any);
+
+        await expect(
+          queryERC20SwapValuesFromLock(
+            swap,
+            { getTransactionReceipt: async () => ({ logs }) } as any,
+            erc20Swap,
+            twoLockupTransactionHash,
+            true,
+            1,
+            logger,
+          ),
+        ).rejects.toEqual(
+          Errors.INVALID_LOCKUP_TRANSACTION(twoLockupTransactionHash),
+        );
+
+        expect(logger.warn).not.toHaveBeenCalled();
+      });
+
+      test('should still fall back when the recorded logIndex is absent', async () => {
+        const logger = { warn: jest.fn() } as unknown as Logger;
+
+        const values = await queryEtherSwapValuesFromLock(
+          swap,
+          await twoLockupProvider(),
+          etherSwap,
+          twoLockupTransactionHash,
+          true,
+          99,
+          logger,
+        );
+
+        expect(values.preimageHash).toEqual(commitmentPreimageHash);
+        expect(logger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('Recorded log index 99'),
+        );
+      });
+    });
   });
 
   describe('without consulting commitment', () => {

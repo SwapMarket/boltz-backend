@@ -148,11 +148,17 @@ const mockHasSymbol = jest
     mockHasSymbolSymbols.includes(symbol),
   );
 
+const mockContractsForAddress = jest.fn().mockResolvedValue({
+  etherSwap: {},
+  erc20Swap: {},
+});
+
 jest.mock('../../../lib/wallet/ethereum/EthereumManager', () => {
   return jest.fn().mockImplementation(() => ({
     address: mockAddress,
     networkDetails: networks.Ethereum,
     hasSymbol: mockHasSymbol,
+    contractsForAddress: mockContractsForAddress,
     provider: {
       onBlock: mockOnBlock,
       getTransaction: mockGetTransaction,
@@ -164,6 +170,17 @@ jest.mock('../../../lib/wallet/ethereum/EthereumManager', () => {
     },
   }));
 });
+
+const mockQueryEtherSwapValuesFromLock = jest.fn().mockResolvedValue({});
+const mockQueryERC20SwapValuesFromLock = jest.fn().mockResolvedValue({});
+
+jest.mock('../../../lib/wallet/ethereum/contracts/ContractUtils', () => ({
+  ...jest.requireActual('../../../lib/wallet/ethereum/contracts/ContractUtils'),
+  queryEtherSwapValuesFromLock: (...args: any[]) =>
+    mockQueryEtherSwapValuesFromLock(...args),
+  queryERC20SwapValuesFromLock: (...args: any[]) =>
+    mockQueryERC20SwapValuesFromLock(...args),
+}));
 
 const MockedEthereumManager = <jest.Mock<EthereumManager>>(
   (<any>EthereumManager)
@@ -939,6 +956,144 @@ describe('EthereumNursery', () => {
     transactionHook.hook = jest.fn().mockReturnValue(Action.Accept);
   });
 
+  test('should reject EtherSwap lockups when no contracts are found', async () => {
+    mockContractsForAddress.mockResolvedValueOnce(undefined);
+
+    const lockupPromise = new Promise<void>((resolve) => {
+      nursery.once('lockup.failed', ({ reason }) => {
+        expect(reason).toEqual(
+          Errors.UNCLAIMABLE_LOCKUP(exampleTransaction.hash!, 21).message,
+        );
+        resolve();
+      });
+    });
+
+    mockGetSwapResult = {
+      pair: 'ETH/BTC',
+      expectedAmount: 10,
+      type: SwapType.Submarine,
+      orderSide: OrderSide.SELL,
+      timeoutBlockHeight: 11102219,
+      id: 'test-eth-swap-id',
+    };
+
+    emitEthLockup({
+      transaction: exampleTransaction,
+      logIndex: 21,
+      etherSwapValues: {
+        claimAddress: mockAddress,
+        refundAddress: mockAddress,
+        amount: BigInt('100000000000'),
+        preimageHash: getHexString(examplePreimageHash),
+        timelock: mockGetSwapResult.timeoutBlockHeight,
+      } as any,
+    });
+
+    await lockupPromise;
+
+    expect(mockQueryEtherSwapValuesFromLock).not.toHaveBeenCalled();
+  });
+
+  test('should reject EtherSwap lockups that cannot be claimed', async () => {
+    mockQueryEtherSwapValuesFromLock.mockRejectedValueOnce(
+      new Error('lockup transaction is invalid'),
+    );
+
+    const lockupPromise = new Promise<void>((resolve) => {
+      nursery.once('lockup.failed', ({ reason }) => {
+        expect(reason).toEqual(
+          Errors.UNCLAIMABLE_LOCKUP(exampleTransaction.hash!, 21).message,
+        );
+        resolve();
+      });
+    });
+
+    mockGetSwapResult = {
+      pair: 'ETH/BTC',
+      expectedAmount: 10,
+      type: SwapType.Submarine,
+      orderSide: OrderSide.SELL,
+      timeoutBlockHeight: 11102219,
+      id: 'test-eth-swap-id',
+    };
+
+    const lockupListener = jest.fn();
+    nursery.once('eth.lockup', lockupListener);
+
+    emitEthLockup({
+      transaction: exampleTransaction,
+      logIndex: 21,
+      etherSwapValues: {
+        claimAddress: mockAddress,
+        refundAddress: mockAddress,
+        amount: BigInt('100000000000'),
+        preimageHash: getHexString(examplePreimageHash),
+        timelock: mockGetSwapResult.timeoutBlockHeight,
+      } as any,
+    });
+
+    await lockupPromise;
+
+    expect(mockSetLockupTransaction).toHaveBeenCalledWith(
+      expect.anything(),
+      exampleTransaction.hash,
+      expect.anything(),
+      SwapUpdateEvent.TransactionLockupFailed,
+      21,
+    );
+    expect(lockupListener).not.toHaveBeenCalled();
+    expect(transactionHook.hook).not.toHaveBeenCalled();
+
+    nursery.removeListener('eth.lockup', lockupListener);
+  });
+
+  test('should reject ERC20Swap lockups that cannot be claimed', async () => {
+    mockQueryERC20SwapValuesFromLock.mockRejectedValueOnce(
+      new Error('lockup transaction is invalid'),
+    );
+
+    const lockupPromise = new Promise<void>((resolve) => {
+      nursery.once('lockup.failed', ({ reason }) => {
+        expect(reason).toEqual(
+          Errors.UNCLAIMABLE_LOCKUP(exampleTransaction.hash!, 21).message,
+        );
+        resolve();
+      });
+    });
+
+    mockGetSwapResult = {
+      pair: 'BTC/USDT',
+      expectedAmount: 10,
+      orderSide: OrderSide.BUY,
+      type: SwapType.Submarine,
+      timeoutBlockHeight: 11102222,
+      id: 'test-erc20-swap-id',
+    };
+
+    const lockupListener = jest.fn();
+    nursery.once('erc20.lockup', lockupListener);
+
+    emitErc20Lockup({
+      transaction: exampleTransaction,
+      logIndex: 21,
+      erc20SwapValues: {
+        claimAddress: mockAddress,
+        refundAddress: mockAddress,
+        amount: BigInt('1000'),
+        tokenAddress: mockTokenAddress,
+        timelock: mockGetSwapResult.timeoutBlockHeight,
+        preimageHash: getHexString(examplePreimageHash),
+      } as any,
+    });
+
+    await lockupPromise;
+
+    expect(lockupListener).not.toHaveBeenCalled();
+    expect(transactionHook.hook).not.toHaveBeenCalled();
+
+    nursery.removeListener('erc20.lockup', lockupListener);
+  });
+
   test('should reject overpaid EtherSwap lockup transactions', async () => {
     mockGetSwapResult = {
       pair: 'ETH/BTC',
@@ -1277,6 +1432,137 @@ describe('EthereumNursery', () => {
       suppliedERC20SwapValues.refundAddress,
     );
   });
+
+  test.each([
+    {
+      name: 'reject a positive raw Ether amount that normalizes to zero',
+      rawAmount: 1n,
+      normalizedAmount: 0,
+      expectedStatus: SwapUpdateEvent.TransactionLockupFailed,
+      expectedReason: Errors.INSUFFICIENT_AMOUNT(0, 1).message,
+    },
+    {
+      name: 'accept a positive representable deferred Ether amount',
+      rawAmount: etherDecimals,
+      normalizedAmount: 1,
+      expectedStatus: SwapUpdateEvent.TransactionConfirmed,
+      expectedReason: undefined,
+    },
+  ])(
+    'should $name',
+    async ({ rawAmount, normalizedAmount, expectedStatus, expectedReason }) => {
+      const deferredSwap = {
+        id: 'deferred-ether-swap',
+        pair: 'ETH/BTC',
+        expectedAmount: undefined,
+        type: SwapType.Submarine,
+        orderSide: OrderSide.SELL,
+        timeoutBlockHeight: 11102219,
+      } as unknown as Swap;
+      const etherSwapValues = {
+        amount: rawAmount,
+        claimAddress: mockAddress,
+        refundAddress: mockRefundAddress,
+        timelock: deferredSwap.timeoutBlockHeight,
+        preimageHash: getHexString(examplePreimageHash),
+      } as unknown as EtherSwapValues;
+      const lockupListener = jest.fn();
+      const failedListener = jest.fn();
+      nursery.on('eth.lockup', lockupListener);
+      nursery.on('lockup.failed', failedListener);
+
+      await nursery.checkEtherSwapLockup(
+        deferredSwap,
+        exampleTransaction,
+        etherSwapValues,
+        21,
+      );
+
+      expect(mockSetLockupTransaction).toHaveBeenCalledWith(
+        deferredSwap,
+        exampleTransaction.hash,
+        normalizedAmount,
+        expectedStatus,
+        21,
+      );
+
+      if (expectedReason === undefined) {
+        expect(lockupListener).toHaveBeenCalledTimes(1);
+        expect(failedListener).not.toHaveBeenCalled();
+      } else {
+        expect(failedListener).toHaveBeenCalledWith(
+          expect.objectContaining({ reason: expectedReason }),
+        );
+        expect(lockupListener).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  test.each([
+    {
+      name: 'reject a positive raw amount that normalizes to zero',
+      rawAmount: 1n,
+      normalizedAmount: 0,
+      expectedStatus: SwapUpdateEvent.TransactionLockupFailed,
+      expectedReason: Errors.INSUFFICIENT_AMOUNT(0, 1).message,
+    },
+    {
+      name: 'accept a positive representable deferred amount',
+      rawAmount: 100n,
+      normalizedAmount: 1,
+      expectedStatus: SwapUpdateEvent.TransactionConfirmed,
+      expectedReason: undefined,
+    },
+  ])(
+    'should $name',
+    async ({ rawAmount, normalizedAmount, expectedStatus, expectedReason }) => {
+      const deferredSwap = {
+        id: 'deferred-erc20-swap',
+        pair: 'BTC/USDT',
+        expectedAmount: undefined,
+        type: SwapType.Submarine,
+        orderSide: OrderSide.BUY,
+        timeoutBlockHeight: 11102222,
+      } as unknown as Swap;
+      const erc20SwapValues = {
+        amount: rawAmount,
+        claimAddress: mockAddress,
+        refundAddress: mockRefundAddress,
+        tokenAddress: mockTokenAddress,
+        timelock: deferredSwap.timeoutBlockHeight,
+        preimageHash: getHexString(examplePreimageHash),
+      } as unknown as ERC20SwapValues;
+      const lockupListener = jest.fn();
+      const failedListener = jest.fn();
+      nursery.on('erc20.lockup', lockupListener);
+      nursery.on('lockup.failed', failedListener);
+
+      await nursery.checkErc20SwapLockup(
+        deferredSwap,
+        exampleTransaction,
+        erc20SwapValues,
+        21,
+      );
+
+      expect(mockSetLockupTransaction).toHaveBeenCalledWith(
+        deferredSwap,
+        exampleTransaction.hash,
+        normalizedAmount,
+        expectedStatus,
+        21,
+      );
+
+      if (expectedReason === undefined) {
+        expect(lockupListener).toHaveBeenCalledTimes(1);
+        expect(failedListener).not.toHaveBeenCalled();
+      } else {
+        expect(failedListener).toHaveBeenCalledWith(
+          expect.objectContaining({ reason: expectedReason }),
+        );
+        expect(lockupListener).not.toHaveBeenCalled();
+      }
+    },
+  );
 
   test('should listen for ERC20Swap lockup events', async () => {
     let lockupEmitted = false;

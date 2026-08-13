@@ -67,6 +67,7 @@ import WrappedSwapRepository from '../db/repositories/WrappedSwapRepository';
 import { msatToSat } from '../lightning/ChannelUtils';
 import type { LightningClient } from '../lightning/LightningClient';
 import { HtlcState, InvoiceState } from '../lightning/LightningClient';
+import NoExistingPaymentActionError from '../lightning/NoExistingPaymentActionError';
 import PendingPaymentTracker from '../lightning/PendingPaymentTracker';
 import type NotificationClient from '../notifications/NotificationClient';
 import { Signer } from '../proto/boltzrpc';
@@ -78,6 +79,7 @@ import { disabledSignerMessage } from '../service/SignerControlUtils';
 import type TimeoutDeltaProvider from '../service/TimeoutDeltaProvider';
 import type ChainSwapSigner from '../service/cooperative/ChainSwapSigner';
 import type DeferredClaimer from '../service/cooperative/DeferredClaimer';
+import { isPreimageValid } from '../service/cooperative/Utils';
 import type Sidecar from '../sidecar/Sidecar';
 import type Wallet from '../wallet/Wallet';
 import type { Currency } from '../wallet/WalletManager';
@@ -364,6 +366,13 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
               return;
             }
 
+            if (
+              swap.invoice &&
+              !(await this.hasValidCollateralForNewPayment(swap))
+            ) {
+              return;
+            }
+
             this.emit('transaction', {
               swap,
               confirmed,
@@ -440,6 +449,13 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
               this.logger.debug(
                 `Not acting on ARK lockup of Submarine Swap ${swap.id} because it is already being processed with status ${swap.status}`,
               );
+              return;
+            }
+
+            if (
+              swap.invoice &&
+              !(await this.hasValidCollateralForNewPayment(swap))
+            ) {
               return;
             }
 
@@ -948,7 +964,9 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
               },
             });
 
-            for (const pendingInvoiceSwap of pendingInvoiceSwaps) {
+            for (const pendingInvoiceSwap of SwapNursery.byExpiryUrgency(
+              pendingInvoiceSwaps,
+            )) {
               const { base, quote } = splitPairId(pendingInvoiceSwap.pair);
               const chainCurrency = this.currencies.get(
                 getChainCurrency(
@@ -959,7 +977,13 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
                 ),
               )!;
 
-              await this.attemptSettleSwap(chainCurrency, pendingInvoiceSwap);
+              try {
+                await this.attemptSettleSwap(chainCurrency, pendingInvoiceSwap);
+              } catch (e) {
+                this.logger.warn(
+                  `Could not settle Swap ${pendingInvoiceSwap.id}: ${formatError(e)}`,
+                );
+              }
             }
           });
 
@@ -967,6 +991,40 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
         });
       }, this.retryInterval * 1000);
     }
+  };
+
+  // Timeouts are only comparable within a chain
+  private static byExpiryUrgency = (swaps: Swap[]): Swap[] => {
+    const groups = new Map<string, Swap[]>();
+
+    for (const swap of swaps) {
+      const { base, quote } = splitPairId(swap.pair);
+      const chainSymbol = getChainCurrency(base, quote, swap.orderSide, false);
+
+      const group = groups.get(chainSymbol);
+      if (group === undefined) {
+        groups.set(chainSymbol, [swap]);
+      } else {
+        group.push(swap);
+      }
+    }
+
+    const sorted = Array.from(groups.values()).map((group) =>
+      group.sort((a, b) => a.timeoutBlockHeight - b.timeoutBlockHeight),
+    );
+
+    const interleaved: Swap[] = [];
+    const longest = Math.max(0, ...sorted.map((group) => group.length));
+
+    for (let i = 0; i < longest; i++) {
+      for (const group of sorted) {
+        if (i < group.length) {
+          interleaved.push(group[i]);
+        }
+      }
+    }
+
+    return interleaved;
   };
 
   private fetchSwapForSettlement = async (
@@ -1011,7 +1069,13 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
     let payRes: PaidSwapInvoice | undefined;
 
     if (swap.type === SwapType.Submarine) {
-      payRes = await this.payInvoice(swap as Swap);
+      const submarineSwap = swap as Swap;
+
+      // Paying again would only rewrite the status of the swap
+      payRes =
+        submarineSwap.preimage !== null && submarineSwap.preimage !== undefined
+          ? { preimage: getHexBuffer(submarineSwap.preimage) }
+          : await this.payInvoice(submarineSwap);
     } else {
       payRes = { preimage: preimage! };
     }
@@ -1420,12 +1484,6 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
           return;
         }
 
-        this.emit('transaction', {
-          swap: updatedSwap,
-          confirmed: true,
-          transaction: transactionHash,
-        });
-
         if (updatedSwap.invoice) {
           const { base, quote } = splitPairId(updatedSwap.pair);
 
@@ -1436,6 +1494,16 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
             return;
           }
 
+          if (!(await this.hasValidCollateralForNewPayment(updatedSwap))) {
+            return;
+          }
+
+          this.emit('transaction', {
+            swap: updatedSwap,
+            confirmed: true,
+            transaction: transactionHash,
+          });
+
           await this.attemptSettleSwap(
             this.currencies.get(
               getChainCurrency(base, quote, updatedSwap.orderSide, false),
@@ -1443,6 +1511,12 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
             updatedSwap,
           );
         } else {
+          this.emit('transaction', {
+            swap: updatedSwap,
+            confirmed: true,
+            transaction: transactionHash,
+          });
+
           await this.setSwapRate(updatedSwap);
         }
       });
@@ -1596,6 +1670,50 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
 
       await SwapRepository.setRate(swap, rate);
     }
+  };
+
+  private hasValidCollateralForNewPayment = async (
+    swap: Swap,
+  ): Promise<boolean> => {
+    if (this.hasSufficientCollateral(swap)) {
+      return true;
+    }
+
+    // These states may enter the recovery path. PaymentHandler independently
+    // prevents them from starting a fresh Lightning or self-payment action.
+    if (
+      swap.status === SwapUpdateEvent.InvoicePending ||
+      swap.status === SwapUpdateEvent.InvoicePaid
+    ) {
+      return true;
+    }
+
+    await this.lockupFailed(swap, this.collateralFailureReason(swap));
+    return false;
+  };
+
+  private hasSufficientCollateral = (swap: Swap): boolean => {
+    const expectedAmount = swap.expectedAmount;
+    const onchainAmount = swap.onchainAmount;
+    return (
+      typeof expectedAmount === 'number' &&
+      expectedAmount > 0 &&
+      typeof onchainAmount === 'number' &&
+      onchainAmount > 0 &&
+      onchainAmount >= expectedAmount
+    );
+  };
+
+  private collateralFailureReason = (swap: Swap): string => {
+    const expectedAmount = swap.expectedAmount;
+    const onchainAmount = swap.onchainAmount;
+
+    return typeof expectedAmount === 'number' &&
+      expectedAmount > 0 &&
+      typeof onchainAmount === 'number' &&
+      onchainAmount > 0
+      ? Errors.INSUFFICIENT_AMOUNT(onchainAmount, expectedAmount).message
+      : Errors.INCORRECT_ASSET_SENT().message;
   };
 
   private assertLockupSignerEnabled = (swap: ReverseSwap | ChainSwapInfo) => {
@@ -2142,7 +2260,30 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
   private payInvoice = async (
     swap: Swap,
   ): Promise<PaidSwapInvoice | undefined> => {
-    const preimage = await this.paymentHandler.payInvoice(swap);
+    if (
+      swap.status === SwapUpdateEvent.InvoicePaid &&
+      swap.preimage !== null &&
+      swap.preimage !== undefined
+    ) {
+      const preimage = getHexBuffer(swap.preimage);
+      if (isPreimageValid(swap, preimage)) {
+        return { preimage };
+      }
+    }
+
+    const allowNewPayment = this.hasSufficientCollateral(swap);
+    let preimage: Buffer | undefined;
+    try {
+      preimage = await this.paymentHandler.payInvoice(swap, allowNewPayment);
+    } catch (error) {
+      if (!(error instanceof NoExistingPaymentActionError) || allowNewPayment) {
+        throw error;
+      }
+
+      // Without an existing payment effect, this path owns neither a terminal
+      // status transition nor cleanup of a potentially concurrent approval hold.
+      return undefined;
+    }
 
     if (preimage === undefined) {
       return undefined;

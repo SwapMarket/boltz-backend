@@ -274,6 +274,21 @@ class SwapRepository {
       },
     );
 
+  public static destroyPristine = async (id: string): Promise<boolean> => {
+    const destroyed = await Swap.destroy({
+      where: {
+        id,
+        invoice: null,
+        onchainAmount: null,
+        lockupTransactionId: null,
+        createdRefundSignature: false,
+        status: SwapUpdateEvent.SwapCreated,
+      },
+    });
+
+    return destroyed > 0;
+  };
+
   public static dropTable = (): Promise<void> => {
     return Swap.drop();
   };

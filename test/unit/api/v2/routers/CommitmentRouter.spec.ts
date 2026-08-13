@@ -165,6 +165,32 @@ describe('CommitmentRouter', () => {
       },
     );
 
+    test('should lowercase mixed case transaction hashes', async () => {
+      const currency = 'RBTC';
+      const swapId = 'swap123';
+      const signature = '0xsignature';
+      const transactionHash = `0x${validTransactionHash.slice(2).toUpperCase()}`;
+
+      const res = mockResponse();
+      await commitmentRouter['postCommitment'](
+        mockRequest({ swapId, signature, transactionHash }, undefined, {
+          currency,
+        }),
+        res,
+      );
+
+      expect(
+        service.walletManager.ethereumManagers[0].commitments.commit,
+      ).toHaveBeenCalledWith(
+        currency,
+        swapId,
+        signature,
+        validTransactionHash.toLowerCase(),
+        undefined,
+        undefined,
+      );
+    });
+
     test('should post commitment', async () => {
       const currency = 'RBTC';
       const swapId = 'swap123';
@@ -311,6 +337,27 @@ describe('CommitmentRouter', () => {
         ).rejects.toEqual(error);
       },
     );
+
+    test('should lowercase mixed case transaction hashes', async () => {
+      const currency = 'RBTC';
+      const transactionHash = `0x${'A'.repeat(64)}`;
+
+      await commitmentRouter['refundCommitment'](
+        mockRequest({ transactionHash, refundAddressSignature }, undefined, {
+          currency,
+        }),
+        mockResponse(),
+      );
+
+      expect(
+        service.swapManager.eipSigner.signCommitmentRefund,
+      ).toHaveBeenCalledWith(
+        currency,
+        `0x${'a'.repeat(64)}`,
+        refundAddressSignature,
+        undefined,
+      );
+    });
 
     test('should refund commitment', async () => {
       const currency = 'RBTC';

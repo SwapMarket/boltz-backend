@@ -687,14 +687,21 @@ class SwapManager {
           fees.percentageFee +
           (fees.extraFee || 0);
 
-        if (swap.onchainAmount && expectedAmount > swap.onchainAmount) {
-          const maxInvoiceAmount = SwapManager.calculateInvoiceAmount(
-            swap.orderSide,
-            rate,
-            swap.onchainAmount,
-            fees.baseFee,
-            fees.percentageFeeRate,
-          );
+        if (
+          swap.onchainAmount !== null &&
+          swap.onchainAmount !== undefined &&
+          (swap.onchainAmount <= 0 || expectedAmount > swap.onchainAmount)
+        ) {
+          const maxInvoiceAmount =
+            swap.onchainAmount <= 0
+              ? 0
+              : SwapManager.calculateInvoiceAmount(
+                  swap.orderSide,
+                  rate,
+                  swap.onchainAmount,
+                  fees.baseFee,
+                  fees.percentageFeeRate,
+                );
 
           // that error was originally thrown in the `Service` class, so we keep backwards-compat
           // by not changing the error code

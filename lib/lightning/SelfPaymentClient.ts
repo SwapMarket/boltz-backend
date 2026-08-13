@@ -4,6 +4,7 @@ import type Logger from '../Logger';
 import { racePromise } from '../PromiseUtils';
 import {
   formatError,
+  getChainCurrency,
   getHexBuffer,
   getHexString,
   getLightningCurrency,
@@ -24,6 +25,7 @@ import SwapRepository from '../db/repositories/SwapRepository';
 import { Signer } from '../proto/boltzrpc';
 import SignerControlRegistry from '../service/SignerControlRegistry';
 import { disabledSignerMessage } from '../service/SignerControlUtils';
+import TimeoutDeltaProvider from '../service/TimeoutDeltaProvider';
 import type DecodedInvoiceSidecar from '../sidecar/DecodedInvoice';
 import LightningNursery from '../swap/LightningNursery';
 import NodeSwitch from '../swap/NodeSwitch';
@@ -60,6 +62,7 @@ class SelfPaymentClient
   constructor(
     logger: Logger,
     private readonly swapNursery: SwapNursery,
+    private readonly timeoutDeltaProvider: TimeoutDeltaProvider,
   ) {
     super(logger, 'SelfPayment');
     this.setClientStatus(ClientStatus.Connected);
@@ -74,6 +77,7 @@ class SelfPaymentClient
     decoded: DecodedInvoiceSidecar,
     cltvLimit: number,
     payments: LightningPayment[],
+    allowNewPayment = true,
   ): Promise<{
     isSelf: boolean;
     result: PaymentResponse | undefined;
@@ -106,6 +110,17 @@ class SelfPaymentClient
           `${swapTypeToPrettyString(swap.type)} Swap ${swap.id} with preimage hash ${swap.preimageHash} is a self payment`,
         );
 
+        if (!allowNewPayment) {
+          if (!this.hasRecoverableSelfPayment(reverseSwap)) {
+            return {
+              isSelf: false,
+              result: undefined,
+            };
+          }
+
+          return await this.getPreimage(swap, reverseSwap);
+        }
+
         if (reverseSwap.status === SwapUpdateEvent.SwapCreated) {
           if (
             SignerControlRegistry.getInstance().isDisabled(
@@ -124,6 +139,12 @@ class SelfPaymentClient
 
           if (decoded.isExpired) {
             throw new Error('invoice expired');
+          }
+
+          if (
+            cltvLimit <= (await this.getReverseBlocksLeft(swap, reverseSwap))
+          ) {
+            throw new Error('reverse swap timeout too late');
           }
 
           this.emit('htlc.accepted', reverseSwap.invoice);
@@ -259,6 +280,40 @@ class SelfPaymentClient
     throw SelfPaymentClient.notImplementedError;
   };
 
+  private getReverseBlocksLeft = async (
+    swap: Swap,
+    reverseSwap: ReverseSwap,
+  ): Promise<number> => {
+    const { base: swapBase, quote: swapQuote } = splitPairId(swap.pair);
+    const { base: reverseBase, quote: reverseQuote } = splitPairId(
+      reverseSwap.pair,
+    );
+
+    const reverseChainSymbol = getChainCurrency(
+      reverseBase,
+      reverseQuote,
+      reverseSwap.orderSide,
+      true,
+    );
+    const lightningSymbol = getLightningCurrency(
+      swapBase,
+      swapQuote,
+      swap.orderSide,
+      false,
+    );
+
+    const blocksLeft = await this.timeoutDeltaProvider.getBlocksLeft(
+      this.swapNursery.currencies.get(reverseChainSymbol)!,
+      reverseSwap.timeoutBlockHeight,
+      lightningSymbol,
+    );
+
+    return TimeoutDeltaProvider.addBuffer(
+      blocksLeft,
+      reverseChainSymbol === lightningSymbol,
+    );
+  };
+
   private waitForPreimage = async (reverseSwap: ReverseSwap) => {
     let handler: ((s: ReverseSwap) => void) | undefined = undefined;
 
@@ -320,6 +375,16 @@ class SelfPaymentClient
       isSelf: true,
     };
   };
+
+  private hasRecoverableSelfPayment = (reverseSwap: ReverseSwap): boolean =>
+    (reverseSwap.preimage !== null && reverseSwap.preimage !== undefined) ||
+    (reverseSwap.transactionId !== null &&
+      reverseSwap.transactionId !== undefined) ||
+    [
+      SwapUpdateEvent.InvoiceSettled,
+      SwapUpdateEvent.TransactionFailed,
+      SwapUpdateEvent.TransactionRefunded,
+    ].includes(reverseSwap.status as SwapUpdateEvent);
 
   private failSelfPayment = (swap: Swap) => {
     this.logger.debug(

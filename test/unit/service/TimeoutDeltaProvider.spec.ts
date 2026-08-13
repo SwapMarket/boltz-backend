@@ -549,6 +549,111 @@ describe('TimeoutDeltaProvider', () => {
     expect(result).toEqual(TimeoutDeltaProvider.noRoutes);
   });
 
+  describe('getBlocksLeft', () => {
+    test.each`
+      description                 | symbol                   | timeoutBlockHeight | targetSymbol             | expected
+      ${'BTC into BTC blocks'}    | ${'BTC'}                 | ${150}             | ${'BTC'}                 | ${50}
+      ${'ARK into BTC blocks'}    | ${ArkClient.symbol}      | ${550}             | ${'BTC'}                 | ${50}
+      ${'ARK into Liquid blocks'} | ${ArkClient.symbol}      | ${550}             | ${ElementsClient.symbol} | ${500}
+      ${'Liquid into BTC blocks'} | ${ElementsClient.symbol} | ${2_500}           | ${'BTC'}                 | ${230}
+      ${'Ether into BTC blocks'}  | ${'ETH'}                 | ${6_050}           | ${'BTC'}                 | ${101}
+      ${'ERC20 into BTC blocks'}  | ${'USDT'}                | ${15_050}          | ${'BTC'}                 | ${271}
+    `(
+      'should get blocks left for $description',
+      async ({ symbol, timeoutBlockHeight, targetSymbol, expected }) => {
+        await expect(
+          deltaProvider.getBlocksLeft(
+            currenciesMap.get(symbol)!,
+            timeoutBlockHeight,
+            targetSymbol,
+          ),
+        ).resolves.toEqual(expected);
+      },
+    );
+
+    test('should get blocks left for ARK with timestamp based locks', async () => {
+      const currentTimestamp = 1_000_000;
+
+      const arkCurrency = currenciesMap.get(ArkClient.symbol)!;
+      arkCurrency.arkNode = {
+        usesLocktimeSeconds: true,
+        getBlockHeight: jest.fn().mockResolvedValue(500),
+        getBlockTimestamp: jest.fn().mockResolvedValue(currentTimestamp),
+      } as any;
+
+      await expect(
+        deltaProvider.getBlocksLeft(
+          arkCurrency,
+          currentTimestamp + 500 * 60,
+          'BTC',
+        ),
+      ).resolves.toEqual(50);
+
+      arkCurrency.arkNode = {
+        getBlockHeight: jest.fn().mockResolvedValue(500),
+        usesLocktimeSeconds: false,
+      } as any;
+    });
+  });
+
+  describe('addBuffer', () => {
+    test.each`
+      description                | blocks  | sameCurrency | expected
+      ${'same currency'}         | ${144}  | ${true}      | ${159}
+      ${'cross chain'}           | ${144}  | ${false}     | ${180}
+      ${'cross chain rounds up'} | ${79}   | ${false}     | ${99}
+      ${'zero'}                  | ${0}    | ${false}     | ${0}
+      ${'negative'}              | ${-100} | ${false}     | ${-100}
+    `(
+      'should add the $description buffer',
+      ({ blocks, sameCurrency, expected }) => {
+        expect(TimeoutDeltaProvider.addBuffer(blocks, sameCurrency)).toEqual(
+          expected,
+        );
+      },
+    );
+
+    test('should never shrink the value it buffers', () => {
+      for (const blocks of [-500, -1, 0, 1, 500]) {
+        for (const sameCurrency of [true, false]) {
+          expect(
+            TimeoutDeltaProvider.addBuffer(blocks, sameCurrency),
+          ).toBeGreaterThanOrEqual(blocks);
+        }
+      }
+    });
+  });
+
+  describe('self payment guard calibration', () => {
+    test.each`
+      description        | symbol                   | onchainDelta | currentBlock | expected
+      ${'same currency'} | ${'BTC'}                 | ${144}       | ${100}       | ${159}
+      ${'cross chain'}   | ${ElementsClient.symbol} | ${1_440}     | ${200}       | ${180}
+    `(
+      'should recompute the reverse swap lightning timeout delta for $description',
+      async ({ symbol, onchainDelta, currentBlock, expected }) => {
+        const sameCurrency = symbol === 'BTC';
+
+        expect(
+          TimeoutDeltaProvider.addBuffer(
+            TimeoutDeltaProvider.convertBlocks(symbol, 'BTC', onchainDelta),
+            sameCurrency,
+          ),
+        ).toEqual(expected);
+
+        const blocksLeft = await deltaProvider.getBlocksLeft(
+          currenciesMap.get(symbol)!,
+          currentBlock + onchainDelta,
+          'BTC',
+        );
+
+        expect(
+          TimeoutDeltaProvider.addBuffer(blocksLeft, sameCurrency),
+        ).toEqual(expected);
+      },
+    );
+  });
+
   describe('getCltvLimit', () => {
     test.each`
       description                 | pair                              | orderSide         | timeoutBlockHeight | expectedLimit

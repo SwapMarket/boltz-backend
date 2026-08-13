@@ -267,20 +267,24 @@ class Commitments {
         throw new Error('invalid signature');
       }
 
-      this.logger.info(
-        `Creating ${currency} commitment for ${swapTypeToPrettyString(swap.type)} Swap ${swapId}: ${transactionHash} (${lockupHash})`,
-      );
-      await CommitmentRepository.create({
-        swapId,
-        lockupHash,
-        transactionHash,
-        signature: getHexBuffer(signature.slice(2)),
-      });
-
       const transaction = await this.provider.getTransaction(transactionHash);
       if (transaction === null) {
         throw new Error('transaction not found');
       }
+
+      this.logger.info(
+        `Creating ${currency} commitment for ${swapTypeToPrettyString(swap.type)} Swap ${swapId}: ${transaction.hash} (${lockupHash})`,
+      );
+      await CommitmentRepository.createForLockup(
+        {
+          swapId,
+          lockupHash,
+          transactionHash: transaction.hash,
+          signature: getHexBuffer(signature.slice(2)),
+        },
+        swap,
+        event.logIndex,
+      );
 
       // The synthetic event is safe because the onchain lockup and the
       // commitment signature were both verified for our claim address.

@@ -1,9 +1,21 @@
 import { randomBytes } from 'crypto';
 import { Signature } from 'ethers';
-import { getHexBuffer } from '../../../../lib/Utils';
+import { generateSwapId, getHexBuffer } from '../../../../lib/Utils';
+import {
+  OrderSide,
+  SwapUpdateEvent,
+  SwapVersion,
+} from '../../../../lib/consts/Enums';
 import type Database from '../../../../lib/db/Database';
+import ChainSwap from '../../../../lib/db/models/ChainSwap';
+import ChainSwapData from '../../../../lib/db/models/ChainSwapData';
 import Commitment from '../../../../lib/db/models/Commitment';
+import Pair from '../../../../lib/db/models/Pair';
+import Swap from '../../../../lib/db/models/Swap';
+import ChainSwapRepository from '../../../../lib/db/repositories/ChainSwapRepository';
 import CommitmentRepository from '../../../../lib/db/repositories/CommitmentRepository';
+import PairRepository from '../../../../lib/db/repositories/PairRepository';
+import SwapRepository from '../../../../lib/db/repositories/SwapRepository';
 import { getPostgresDatabase } from '../../../Utils';
 
 describe('CommitmentRepository', () => {
@@ -33,6 +45,9 @@ describe('CommitmentRepository', () => {
     database = getPostgresDatabase();
     await Commitment.drop();
     await database.init();
+
+    await PairRepository.addPair({ id: 'ETH/BTC', base: 'ETH', quote: 'BTC' });
+    await PairRepository.addPair({ id: 'BTC/ETH', base: 'BTC', quote: 'ETH' });
   });
 
   beforeEach(async () => {
@@ -41,6 +56,10 @@ describe('CommitmentRepository', () => {
 
   afterAll(async () => {
     await Commitment.drop();
+    await ChainSwapData.destroy({ truncate: true, cascade: true });
+    await ChainSwap.destroy({ truncate: true, cascade: true });
+    await Swap.destroy({ truncate: true, cascade: true });
+    await Pair.destroy({ truncate: true, cascade: true });
     await database.close();
   });
 
@@ -99,6 +118,219 @@ describe('CommitmentRepository', () => {
 
       expect(result.swapId).toBeNull();
       expect(result.lockupHash).toEqual(commitment.lockupHash);
+    });
+  });
+
+  describe('createForLockup', () => {
+    const lockupTransactionId = `0x${randomBytes(32).toString('hex')}`;
+
+    const addSwap = async (lockup?: { id: string; vout: number }) => {
+      const id = generateSwapId(SwapVersion.Taproot);
+      await SwapRepository.addSwap({
+        id,
+        pair: 'ETH/BTC',
+        expectedAmount: 1,
+        orderSide: OrderSide.BUY,
+        version: SwapVersion.Taproot,
+        timeoutBlockHeight: 123,
+        lockupAddress: '0xcontract',
+        preimageHash: randomBytes(32).toString('hex'),
+        status: SwapUpdateEvent.SwapCreated,
+        createdRefundSignature: false,
+      });
+
+      if (lockup !== undefined) {
+        await Swap.update(
+          {
+            lockupTransactionId: lockup.id,
+            lockupTransactionVout: lockup.vout,
+          },
+          { where: { id } },
+        );
+      }
+
+      return (await SwapRepository.getSwap({ id }))!;
+    };
+
+    const addChainSwap = async (lockup?: { id: string; vout: number }) => {
+      const id = generateSwapId(SwapVersion.Taproot);
+      await ChainSwapRepository.addChainSwap({
+        chainSwap: {
+          id,
+          fee: 0,
+          pair: 'BTC/ETH',
+          orderSide: OrderSide.BUY,
+          acceptZeroConf: false,
+          createdRefundSignature: false,
+          status: SwapUpdateEvent.SwapCreated,
+          preimageHash: randomBytes(32).toString('hex'),
+        },
+        sendingData: {
+          swapId: id,
+          symbol: 'BTC',
+          expectedAmount: 0,
+          lockupAddress: 'bc1qsending',
+          timeoutBlockHeight: 321,
+        },
+        receivingData: {
+          swapId: id,
+          symbol: 'ETH',
+          expectedAmount: 1,
+          timeoutBlockHeight: 123,
+          lockupAddress: '0xcontract',
+        },
+      });
+
+      if (lockup !== undefined) {
+        await ChainSwapData.update(
+          { transactionId: lockup.id, transactionVout: lockup.vout },
+          { where: { swapId: id, symbol: 'ETH' } },
+        );
+      }
+
+      return (await ChainSwapRepository.getChainSwap({ id }))!;
+    };
+
+    test('should reserve the lockup of a submarine swap', async () => {
+      const swap = await addSwap();
+      const commitment = createCommitment({
+        swapId: swap.id,
+        transactionHash: lockupTransactionId,
+      });
+
+      await CommitmentRepository.createForLockup(commitment, swap, 3);
+
+      expect(await CommitmentRepository.getBySwapId(swap.id)).not.toBeNull();
+
+      const updated = (await SwapRepository.getSwap({ id: swap.id }))!;
+      expect(updated.lockupTransactionId).toEqual(lockupTransactionId);
+      expect(updated.lockupTransactionVout).toEqual(3);
+      expect(updated.status).toEqual(SwapUpdateEvent.SwapCreated);
+    });
+
+    test('should accept a submarine swap that already owns the same lockup', async () => {
+      const swap = await addSwap({ id: lockupTransactionId, vout: 3 });
+
+      await CommitmentRepository.createForLockup(
+        createCommitment({
+          swapId: swap.id,
+          transactionHash: lockupTransactionId,
+        }),
+        swap,
+        3,
+      );
+
+      expect(await CommitmentRepository.getBySwapId(swap.id)).not.toBeNull();
+    });
+
+    test('should throw when another lockup owns the submarine swap', async () => {
+      const swap = await addSwap({ id: `0x${'ab'.repeat(32)}`, vout: 1 });
+
+      await expect(
+        CommitmentRepository.createForLockup(
+          createCommitment({
+            swapId: swap.id,
+            transactionHash: lockupTransactionId,
+          }),
+          swap,
+          3,
+        ),
+      ).rejects.toThrow('swap has a lockup transaction already');
+
+      expect(await CommitmentRepository.getBySwapId(swap.id)).toBeNull();
+
+      const updated = (await SwapRepository.getSwap({ id: swap.id }))!;
+      expect(updated.lockupTransactionId).toEqual(`0x${'ab'.repeat(32)}`);
+      expect(updated.lockupTransactionVout).toEqual(1);
+    });
+
+    test('should throw when the same transaction has a different log index', async () => {
+      const swap = await addSwap({ id: lockupTransactionId, vout: 1 });
+
+      await expect(
+        CommitmentRepository.createForLockup(
+          createCommitment({
+            swapId: swap.id,
+            transactionHash: lockupTransactionId,
+          }),
+          swap,
+          3,
+        ),
+      ).rejects.toThrow('swap has a lockup transaction already');
+
+      expect(await CommitmentRepository.getBySwapId(swap.id)).toBeNull();
+    });
+
+    test('should reserve the lockup of a chain swap', async () => {
+      const swap = await addChainSwap();
+
+      await CommitmentRepository.createForLockup(
+        createCommitment({
+          swapId: swap.id,
+          transactionHash: lockupTransactionId,
+        }),
+        swap,
+        7,
+      );
+
+      expect(await CommitmentRepository.getBySwapId(swap.id)).not.toBeNull();
+
+      const updated = (await ChainSwapRepository.getChainSwap({
+        id: swap.id,
+      }))!;
+      expect(updated.receivingData.transactionId).toEqual(lockupTransactionId);
+      expect(updated.receivingData.transactionVout).toEqual(7);
+      expect(updated.status).toEqual(SwapUpdateEvent.SwapCreated);
+    });
+
+    test('should throw when another lockup owns the chain swap', async () => {
+      const swap = await addChainSwap({ id: `0x${'cd'.repeat(32)}`, vout: 2 });
+
+      await expect(
+        CommitmentRepository.createForLockup(
+          createCommitment({
+            swapId: swap.id,
+            transactionHash: lockupTransactionId,
+          }),
+          swap,
+          7,
+        ),
+      ).rejects.toThrow('swap has a lockup transaction already');
+
+      expect(await CommitmentRepository.getBySwapId(swap.id)).toBeNull();
+    });
+
+    test('should throw when the chain swap does not exist', async () => {
+      const swap = await addChainSwap();
+      await ChainSwapData.destroy({ where: { swapId: swap.id } });
+      await ChainSwap.destroy({ where: { id: swap.id } });
+
+      await expect(
+        CommitmentRepository.createForLockup(
+          createCommitment({
+            swapId: swap.id,
+            transactionHash: lockupTransactionId,
+          }),
+          swap,
+          7,
+        ),
+      ).rejects.toThrow('swap has a lockup transaction already');
+    });
+
+    test('should throw when the swap does not exist', async () => {
+      const swap = await addSwap();
+      await Swap.destroy({ where: { id: swap.id } });
+
+      await expect(
+        CommitmentRepository.createForLockup(
+          createCommitment({
+            swapId: swap.id,
+            transactionHash: lockupTransactionId,
+          }),
+          swap,
+          3,
+        ),
+      ).rejects.toThrow('swap has a lockup transaction already');
     });
   });
 

@@ -21,6 +21,12 @@ import { Action } from '../../../lib/swap/hooks/CreationHook';
 import type TransactionHook from '../../../lib/swap/hooks/TransactionHook';
 import { networks } from '../../../lib/wallet/ethereum/EvmNetworks';
 
+jest.mock('../../../lib/wallet/ethereum/contracts/ContractUtils', () => ({
+  ...jest.requireActual('../../../lib/wallet/ethereum/contracts/ContractUtils'),
+  queryEtherSwapValuesFromLock: jest.fn().mockResolvedValue({}),
+  queryERC20SwapValuesFromLock: jest.fn().mockResolvedValue({}),
+}));
+
 describe('EthereumNursery', () => {
   let database: Database;
 
@@ -50,6 +56,7 @@ describe('EthereumNursery', () => {
       hasSymbol: () => true,
       provider: {},
       contractEventHandler: { on: () => {} },
+      contractsForAddress: async () => ({ etherSwap: {}, erc20Swap: {} }),
     } as any,
     transactionHook,
     new OverpaymentProtector(Logger.disabledLogger),

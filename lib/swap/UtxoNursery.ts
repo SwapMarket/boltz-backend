@@ -785,22 +785,23 @@ class UtxoNursery extends TypedEventEmitter<{
       return;
     }
 
+    if (outputValue === 0) {
+      this.emit('swap.lockup.failed', {
+        swap: updatedSwap,
+        reason: Errors.INCORRECT_ASSET_SENT().message,
+      });
+
+      return;
+    }
+
     if (updatedSwap.expectedAmount) {
       if (updatedSwap.expectedAmount > outputValue) {
-        let reason: string;
-
-        if (outputValue === 0) {
-          reason = Errors.INCORRECT_ASSET_SENT().message;
-        } else {
-          reason = Errors.INSUFFICIENT_AMOUNT(
+        this.emit('swap.lockup.failed', {
+          swap: updatedSwap,
+          reason: Errors.INSUFFICIENT_AMOUNT(
             outputValue,
             updatedSwap.expectedAmount,
-          ).message;
-        }
-
-        this.emit('swap.lockup.failed', {
-          reason,
-          swap: updatedSwap,
+          ).message,
         });
 
         return;

@@ -1644,7 +1644,7 @@ class Service {
 
     referralId?: string;
   }> => {
-    let swap = await SwapRepository.getSwap({
+    const swap = await SwapRepository.getSwap({
       invoice,
     });
 
@@ -1699,10 +1699,12 @@ class Service {
         timeoutBlockHeights: createdSwap.timeoutBlockHeights,
       };
     } catch (error) {
-      swap = await SwapRepository.getSwap({
-        id: createdSwap.id,
-      });
-      await swap?.destroy();
+      if (!(await SwapRepository.destroyPristine(createdSwap.id))) {
+        this.logger.warn(
+          `Not rolling back Swap ${createdSwap.id} after its creation failed because it is not pristine anymore`,
+        );
+        throw error;
+      }
 
       if (webHook !== undefined) {
         await this.removeWebHook(createdSwap.id);
@@ -1940,15 +1942,24 @@ class Service {
         args.version,
       );
 
-    let lightningTimeoutBlockDelta = TimeoutDeltaProvider.convertBlocks(
-      sending,
-      receiving,
-      onchainTimeoutBlockDelta,
+    const lightningTimeoutBlockDelta = TimeoutDeltaProvider.addBuffer(
+      TimeoutDeltaProvider.convertBlocks(
+        sending,
+        receiving,
+        onchainTimeoutBlockDelta,
+      ),
+      sending === receiving,
     );
 
-    // Add 15 blocks to the delta for same currency swaps and 25% for cross chain ones as buffer
-    lightningTimeoutBlockDelta +=
-      sending === receiving ? 15 : Math.ceil(lightningTimeoutBlockDelta * 0.25);
+    if (
+      decodedInvoice !== undefined &&
+      decodedInvoice.guaranteedFinalCltv < lightningTimeoutBlockDelta
+    ) {
+      throw Errors.INVOICE_CLTV_TOO_SMALL(
+        decodedInvoice.guaranteedFinalCltv,
+        lightningTimeoutBlockDelta,
+      );
+    }
 
     const rate = getRate(pairRate, side, true);
     const feePercent = this.rateProvider.feeProvider.getPercentageFee(

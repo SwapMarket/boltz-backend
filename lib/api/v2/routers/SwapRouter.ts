@@ -36,6 +36,8 @@ const metadataMaxBytes = 1024;
 const metadataMaxHexLength = metadataMaxBytes * 2;
 const metadataHexRegex = /^(?:[0-9a-fA-F]{2})+$/;
 
+const extraFeesIdMaxLength = 255;
+
 class SwapRouter extends RouterBase {
   constructor(
     logger: Logger,
@@ -3590,7 +3592,11 @@ class SwapRouter extends RouterBase {
       { name: 'percentage', type: 'number', optional: true },
     ]);
 
-    if (unsafeKeys.has(res.id)) {
+    if (
+      unsafeKeys.has(res.id) ||
+      res.id.length === 0 ||
+      res.id.length > extraFeesIdMaxLength
+    ) {
       throw ApiErrors.INVALID_EXTRA_FEES_ID(res.id);
     }
 

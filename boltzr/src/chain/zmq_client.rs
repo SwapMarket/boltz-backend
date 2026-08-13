@@ -1,6 +1,6 @@
 use crate::{
     chain::{
-        Config,
+        Config, TRANSACTION_CHANNEL_SIZE,
         types::{Type, ZmqNotification},
         utils::{Block, Transaction},
     },
@@ -11,7 +11,6 @@ use tokio::time::{Duration, timeout};
 use tracing::{debug, error, info, warn};
 use zeromq::{Socket, SocketRecv, SubSocket, ZmqError, ZmqMessage};
 
-pub const ZMQ_TX_CHANNEL_SIZE: usize = 1024 * 16;
 pub const ZMQ_BLOCK_CHANNEL_SIZE: usize = 1024;
 
 const ZMQ_RECONNECT_DELAY_SECONDS: u64 = 1;
@@ -35,7 +34,7 @@ impl ZmqClient {
             client_type,
             network,
             config,
-            tx_sender: broadcast::channel::<Transaction>(ZMQ_TX_CHANNEL_SIZE).0,
+            tx_sender: broadcast::channel::<Transaction>(TRANSACTION_CHANNEL_SIZE).0,
             block_sender: broadcast::channel::<Block>(ZMQ_BLOCK_CHANNEL_SIZE).0,
         }
     }

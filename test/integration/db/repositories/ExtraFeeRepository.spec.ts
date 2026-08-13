@@ -45,6 +45,21 @@ describe('ExtraFeeRepository', () => {
     });
   });
 
+  test('should create ids of the maximal length', async () => {
+    const id = 'a'.repeat(255);
+    await ExtraFeeRepository.create({ ...extraFeeFixture, id });
+
+    expect((await ExtraFeeRepository.get(extraFeeFixture.swapId))!.id).toEqual(
+      id,
+    );
+  });
+
+  test('should reject ids longer than the column', async () => {
+    await expect(
+      ExtraFeeRepository.create({ ...extraFeeFixture, id: 'a'.repeat(256) }),
+    ).rejects.toThrow('value too long for type character varying(255)');
+  });
+
   test('should set fee', async () => {
     await ExtraFeeRepository.create(extraFeeFixture);
     await ExtraFeeRepository.setFee(extraFeeFixture.swapId, 2000);

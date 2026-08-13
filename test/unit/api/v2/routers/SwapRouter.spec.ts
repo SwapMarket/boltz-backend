@@ -2975,6 +2975,70 @@ describe('SwapRouter', () => {
         ).toThrow(ApiErrors.INVALID_EXTRA_FEES_ID(id));
       },
     );
+
+    test.each([256, 1_000])('should reject ids of length %i', (length) => {
+      const id = 'a'.repeat(length);
+
+      expect(() => swapRouter['parseExtraFees']({ id, percentage: 1 })).toThrow(
+        ApiErrors.INVALID_EXTRA_FEES_ID(id),
+      );
+    });
+
+    test('should allow ids of the maximal length', () => {
+      const id = 'a'.repeat(255);
+
+      expect(swapRouter['parseExtraFees']({ id, percentage: 1 })).toEqual({
+        id,
+        percentage: 1,
+      });
+    });
+
+    test('should reject empty ids', () => {
+      expect(() =>
+        swapRouter['parseExtraFees']({ id: '', percentage: 1 }),
+      ).toThrow(ApiErrors.INVALID_EXTRA_FEES_ID(''));
+    });
+
+    describe('routes', () => {
+      const extraFees = {
+        id: 'a'.repeat(256),
+        percentage: 5,
+      };
+
+      test.each`
+        name            | handler                  | body
+        ${'submarine'}  | ${'createSubmarine'}     | ${{ to: 'BTC', from: 'L-BTC', invoice: 'LNBC1', refundPublicKey: '0021' }}
+        ${'setInvoice'} | ${'setSubmarineInvoice'} | ${{ invoice: 'LNBC1' }}
+        ${'reverse'}    | ${'createReverse'}       | ${{ to: 'L-BTC', from: 'BTC', claimPublicKey: '21' }}
+        ${'chain'}      | ${'createChain'}         | ${{ to: 'L-BTC', from: 'BTC', claimPublicKey: '21', refundPublicKey: '12', userLockAmount: 123 }}
+      `(
+        'should reject too long ids on the $name route',
+        async ({ handler, body }) => {
+          const res = mockResponse();
+
+          await expect(
+            swapRouter[handler](
+              mockRequest(
+                {
+                  ...body,
+                  extraFees,
+                  preimageHash: getHexString(randomBytes(32)),
+                },
+                undefined,
+                { id: 'swapId' },
+              ),
+              res,
+            ),
+          ).rejects.toEqual(ApiErrors.INVALID_EXTRA_FEES_ID(extraFees.id));
+
+          expect(service.createSwapWithInvoice).not.toHaveBeenCalled();
+          expect(service.createSwap).not.toHaveBeenCalled();
+          expect(service.setInvoice).not.toHaveBeenCalled();
+          expect(service.createReverseSwap).not.toHaveBeenCalled();
+          expect(service.createChainSwap).not.toHaveBeenCalled();
+        },
+      );
+    });
   });
 
   describe('getReferralFromHeader', () => {

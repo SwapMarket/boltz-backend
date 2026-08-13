@@ -21,6 +21,9 @@ pub mod types;
 pub mod utils;
 pub mod zmq_client;
 
+/// Capacity for channels forwarding transactions from chain clients.
+pub const TRANSACTION_CHANNEL_SIZE: usize = 1024 * 16;
+
 #[derive(PartialEq, Debug, Clone)]
 pub enum Transactions {
     Single(Transaction),

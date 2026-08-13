@@ -279,4 +279,100 @@ describe('LightningPaymentRepository', () => {
       expect(res[0].Swap.id).toEqual(swap.id);
     });
   });
+
+  describe('findByPreimageHashesAndStatus', () => {
+    test('should find the payments of multiple preimage hashes', async () => {
+      const swaps = await Promise.all([
+        Swap.create(createSubmarineSwapData()),
+        Swap.create(createSubmarineSwapData()),
+        Swap.create(createSubmarineSwapData()),
+      ]);
+
+      for (const swap of swaps) {
+        await LightningPaymentRepository.create({
+          nodeId: lndNodeId,
+          preimageHash: swap.preimageHash,
+        });
+      }
+
+      const res =
+        await LightningPaymentRepository.findByPreimageHashesAndStatus(
+          [swaps[0].preimageHash, swaps[2].preimageHash],
+          LightningPaymentStatus.Pending,
+        );
+
+      expect(res).toHaveLength(2);
+      expect(res.map((payment) => payment.preimageHash).sort()).toEqual(
+        [swaps[0].preimageHash, swaps[2].preimageHash].sort(),
+      );
+    });
+
+    test('should only find the payments with the status', async () => {
+      const [success, pending] = await Promise.all([
+        Swap.create(createSubmarineSwapData()),
+        Swap.create(createSubmarineSwapData()),
+      ]);
+
+      for (const swap of [success, pending]) {
+        await LightningPaymentRepository.create({
+          nodeId: lndNodeId,
+          preimageHash: swap.preimageHash,
+        });
+      }
+      await LightningPaymentRepository.setStatus(
+        success.preimageHash,
+        lndNodeId,
+        LightningPaymentStatus.Success,
+      );
+
+      const res =
+        await LightningPaymentRepository.findByPreimageHashesAndStatus(
+          [success.preimageHash, pending.preimageHash],
+          LightningPaymentStatus.Success,
+        );
+
+      expect(res).toHaveLength(1);
+      expect(res[0].preimageHash).toEqual(success.preimageHash);
+    });
+
+    test('should set updatedAt when the payment succeeds', async () => {
+      const swap = await Swap.create(createSubmarineSwapData());
+      const created = await LightningPaymentRepository.create({
+        nodeId: lndNodeId,
+        preimageHash: swap.preimageHash,
+      });
+
+      await LightningPaymentRepository.setStatus(
+        swap.preimageHash,
+        lndNodeId,
+        LightningPaymentStatus.Success,
+      );
+
+      const res =
+        await LightningPaymentRepository.findByPreimageHashesAndStatus(
+          [swap.preimageHash],
+          LightningPaymentStatus.Success,
+        );
+
+      expect(res[0].updatedAt).toBeInstanceOf(Date);
+      expect(res[0].updatedAt.getTime()).toBeGreaterThanOrEqual(
+        created.createdAt.getTime(),
+      );
+    });
+
+    test('should not query when no preimage hashes are given', async () => {
+      const swap = await Swap.create(createSubmarineSwapData());
+      await LightningPaymentRepository.create({
+        nodeId: lndNodeId,
+        preimageHash: swap.preimageHash,
+      });
+
+      await expect(
+        LightningPaymentRepository.findByPreimageHashesAndStatus(
+          [],
+          LightningPaymentStatus.Pending,
+        ),
+      ).resolves.toEqual([]);
+    });
+  });
 });

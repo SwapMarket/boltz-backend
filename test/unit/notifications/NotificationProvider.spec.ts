@@ -12,6 +12,7 @@ import NotificationClient from '../../../lib/notifications/NotificationClient';
 import NotificationProvider from '../../../lib/notifications/NotificationProvider';
 import Service from '../../../lib/service/Service';
 import type Sidecar from '../../../lib/sidecar/Sidecar';
+import { findPaidUnclaimedSwaps } from '../../../lib/swap/PaidUnclaimedSwaps';
 import WalletManager from '../../../lib/wallet/WalletManager';
 import { networks } from '../../../lib/wallet/ethereum/EvmNetworks';
 import { wait } from '../../Utils';
@@ -107,6 +108,10 @@ const mockedNotificationClient = <jest.Mock<NotificationClient>>(
   (<any>NotificationClient)
 );
 
+jest.mock('../../../lib/swap/PaidUnclaimedSwaps', () => ({
+  findPaidUnclaimedSwaps: jest.fn().mockResolvedValue([]),
+}));
+
 jest.mock('../../../lib/wallet/WalletManager', () => {
   return jest.fn().mockImplementation(() => {
     return {
@@ -191,6 +196,12 @@ describe('NotificationProvider', () => {
 
     expect(mockGetInfo).toHaveBeenCalledTimes(1);
     expect(mockGetBalance).toHaveBeenCalledTimes(1);
+  });
+
+  test('should check for paid but unclaimed swaps', async () => {
+    await notificationProvider.init();
+
+    expect(findPaidUnclaimedSwaps).toHaveBeenCalledTimes(1);
   });
 
   test('should send a notification after successful Swaps', async () => {

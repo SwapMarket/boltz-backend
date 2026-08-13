@@ -1,4 +1,5 @@
 use crate::api::ws::types::SwapStatus;
+use crate::chain::TRANSACTION_CHANNEL_SIZE;
 use crate::db::helpers::web_hook::WebHookHelper;
 use crate::db::models::{WebHook, WebHookState};
 use crate::grpc::service::boltzr::boltz_r_server::BoltzR;
@@ -37,11 +38,12 @@ use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{Mutex, mpsc};
 use tonic::codegen::tokio_stream::Stream;
 use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
 use tonic::{Code, Request, Response, Status, Streaming};
-use tracing::{debug, error, instrument, trace};
+use tracing::{debug, error, instrument, trace, warn};
 
 pub mod boltzr {
     tonic::include_proto!("boltzr");
@@ -184,7 +186,16 @@ where
 
         let (tx, rx) = mpsc::channel(CHANNEL_BUFFER_SIZE);
         tokio::spawn(async move {
-            while let Ok(message) = notification_rx.recv().await {
+            loop {
+                let message = match notification_rx.recv().await {
+                    Ok(message) => message,
+                    Err(RecvError::Closed) => break,
+                    Err(RecvError::Lagged(skipped)) => {
+                        warn!("GetMessage stream lagged behind by {} messages", skipped);
+                        continue;
+                    }
+                };
+
                 match tx.send(Ok(GetMessagesResponse { message })).await {
                     Ok(_) => {}
                     Err(err) => {
@@ -255,7 +266,19 @@ where
 
         let (tx, rx) = mpsc::channel(CHANNEL_BUFFER_SIZE);
         tokio::spawn(async move {
-            while let Ok(update) = update_rx.recv().await {
+            loop {
+                let update = match update_rx.recv().await {
+                    Ok(update) => update,
+                    Err(RecvError::Closed) => break,
+                    Err(RecvError::Lagged(skipped)) => {
+                        warn!(
+                            "send_swap_update stream lagged behind by {} messages",
+                            skipped
+                        );
+                        continue;
+                    }
+                };
+
                 if let Err(err) = tx
                     .send(Ok(SendSwapUpdateResponse {
                         update: Some(SwapUpdate {
@@ -764,7 +787,19 @@ where
             let mut block_rx = client.block_receiver();
 
             tokio::spawn(async move {
-                while let Ok((height, block)) = block_rx.recv().await {
+                loop {
+                    let (height, block) = match block_rx.recv().await {
+                        Ok(block) => block,
+                        Err(RecvError::Closed) => break,
+                        Err(RecvError::Lagged(skipped)) => {
+                            warn!(
+                                "block_added stream for {} lagged behind by {} messages",
+                                symbol, skipped
+                            );
+                            continue;
+                        }
+                    };
+
                     if let Err(err) = tx
                         .send(Ok(Block {
                             symbol: symbol.clone(),
@@ -790,11 +825,23 @@ where
         &self,
         _: Request<RelevantTransactionRequest>,
     ) -> Result<Response<Self::TransactionFoundStream>, Status> {
-        let (tx, rx) = mpsc::channel(CHANNEL_BUFFER_SIZE);
+        let (tx, rx) = mpsc::channel(TRANSACTION_CHANNEL_SIZE);
 
         let mut relevant_tx_rx = self.manager.relevant_tx_receiver();
         tokio::spawn(async move {
-            while let Ok(relevant_tx) = relevant_tx_rx.recv().await {
+            loop {
+                let relevant_tx = match relevant_tx_rx.recv().await {
+                    Ok(relevant_tx) => relevant_tx,
+                    Err(RecvError::Closed) => break,
+                    Err(RecvError::Lagged(skipped)) => {
+                        error!(
+                            "transaction_found stream lagged behind by {} messages",
+                            skipped
+                        );
+                        continue;
+                    }
+                };
+
                 if let Err(err) = tx
                     .send(Ok(RelevantTransaction {
                         symbol: relevant_tx.symbol,
@@ -839,23 +886,28 @@ mod test {
     use crate::grpc::service::boltzr::sign_evm_refund_request::Contract;
     use crate::grpc::service::boltzr::{
         CreateWebHookRequest, CreateWebHookResponse, DeleteWebHookRequest, DeleteWebHookResponse,
-        GetInfoRequest, GetInfoResponse, SendWebHookRequest, SendWebHookResponse,
-        SignEvmRefundRequest, StartWebHookRetriesRequest, StartWebHookRetriesResponse,
+        GetInfoRequest, GetInfoResponse, RelevantTransactionRequest, SendWebHookRequest,
+        SendWebHookResponse, SignEvmRefundRequest, StartWebHookRetriesRequest,
+        StartWebHookRetriesResponse,
     };
     use crate::grpc::status_fetcher::StatusFetcher;
     use crate::notifications::commands::Commands;
     use crate::service::Service;
     use crate::swap::SwapUpdate;
+    use crate::swap::TxStatus;
     use crate::swap::manager::test::MockManager;
     use crate::tracing_setup::ReloadHandler;
     use boltz_cache::{Cache, MemCache};
     use boltz_evm::FixedBytes;
+    use futures::StreamExt;
     use mockall::mock;
     use rand::Rng;
     use std::collections::HashMap;
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
     use tonic::{Code, Request};
+
+    const TEST_TX: &str = "010000000001019ea6632532afe2b57234829e8bb87c0586a2db0b37aa9378298c215e55c55b040000000000ffffffff02160b3600000000001600140e9aab3b924ad7f6c4813b1acad0441c655c9b5440420f000000000016001427001f1066a6f58e25f97ea1b353b3e56985fa8802473044022004637adf050dde916f66a9a169217a6c20c8107cd1a11189141cfed34d0e8897022059d1d8d9279152972f0e67d6b5a6ceec122b360214a6aac317888a1aef84e7de012103504290a1e9a3718103a93d40494af17af63dfa2a721d97cdc2cb526863f7055700000000";
 
     mock! {
         SwapHelper {}
@@ -1160,10 +1212,69 @@ mod test {
         );
     }
 
+    #[tokio::test]
+    async fn test_transaction_found_survives_lag() {
+        const LAG_CAPACITY: usize = 2;
+        const SENT: usize = 10;
+
+        let (relevant_tx_tx, _) =
+            tokio::sync::broadcast::channel::<crate::swap::RelevantTx>(LAG_CAPACITY);
+
+        let sender = relevant_tx_tx.clone();
+        let (_, svc) = make_service_with_manager(move |evm_manager| {
+            let mut manager = make_mock_manager(Some(evm_manager));
+            manager
+                .expect_relevant_tx_receiver()
+                .returning(move || sender.subscribe());
+            manager
+        })
+        .await;
+
+        let mut stream = svc
+            .transaction_found(Request::new(RelevantTransactionRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let tx = crate::chain::utils::Transaction::parse_hex(
+            &crate::chain::types::Type::Bitcoin,
+            TEST_TX,
+        )
+        .unwrap();
+
+        for i in 0..SENT {
+            relevant_tx_tx
+                .send(crate::swap::RelevantTx {
+                    symbol: "BTC".to_string(),
+                    tx: tx.clone(),
+                    status: TxStatus::Confirmed,
+                    swaps: vec![i.to_string()],
+                })
+                .unwrap();
+        }
+
+        for i in SENT - LAG_CAPACITY..SENT {
+            let received = stream.next().await.unwrap().unwrap();
+            assert_eq!(received.swap_ids, vec![i.to_string()]);
+        }
+    }
+
     async fn make_service() -> (
         CancellationToken,
         BoltzService<MockManager, crate::notifications::mattermost::Client<Commands>>,
     ) {
+        make_service_with_manager(|evm_manager| make_mock_manager(Some(evm_manager))).await
+    }
+
+    async fn make_service_with_manager<F>(
+        make_manager: F,
+    ) -> (
+        CancellationToken,
+        BoltzService<MockManager, crate::notifications::mattermost::Client<Commands>>,
+    )
+    where
+        F: FnOnce(Arc<boltz_evm::Manager>) -> MockManager,
+    {
         let token = CancellationToken::new();
         let (status_tx, _) =
             tokio::sync::broadcast::channel::<(Option<u64>, Vec<ws::types::SwapStatus>)>(1);
@@ -1197,7 +1308,7 @@ mod test {
                     None,
                     Cache::Memory(MemCache::new()),
                 )),
-                Arc::new(make_mock_manager(Some(evm_manager))),
+                Arc::new(make_manager(evm_manager)),
                 StatusFetcher::new(Cache::Memory(MemCache::new())),
                 status_tx,
                 Arc::new(Box::new(make_mock_hook_helper())),

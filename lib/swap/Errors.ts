@@ -143,4 +143,8 @@ export default {
     message: 'incorrect asset was sent',
     code: concatErrorCode(ErrorCodePrefix.Swap, 31),
   }),
+  UNCLAIMABLE_LOCKUP: (transactionId: string, vout?: number): Error => ({
+    message: `lockup ${transactionId}:${vout} cannot be claimed`,
+    code: concatErrorCode(ErrorCodePrefix.Swap, 32),
+  }),
 };

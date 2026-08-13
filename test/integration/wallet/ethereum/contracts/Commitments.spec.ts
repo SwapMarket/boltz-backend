@@ -12,6 +12,7 @@ import {
   SwapVersion,
 } from '../../../../../lib/consts/Enums';
 import type Database from '../../../../../lib/db/Database';
+import { LockupWriteOutcome } from '../../../../../lib/db/LockupIdentity';
 import ChainSwap from '../../../../../lib/db/models/ChainSwap';
 import ChainSwapData from '../../../../../lib/db/models/ChainSwapData';
 import Commitment from '../../../../../lib/db/models/Commitment';
@@ -811,6 +812,21 @@ describe('Commitments', () => {
 
   describe('commit', () => {
     const zeroPreimageHash = Buffer.alloc(32);
+
+    const lockupLogIndex = async (
+      contract: EtherSwap | ERC20Swap,
+      transactionHash: string,
+    ) => {
+      const receipt =
+        await setup.provider.getTransactionReceipt(transactionHash);
+      const topic = contract.interface.getEvent('Lockup').topicHash;
+      const address = (await contract.getAddress()).toLowerCase();
+
+      return receipt!.logs.find(
+        (log) =>
+          log.topics[0] === topic && log.address.toLowerCase() === address,
+      )!.index;
+    };
 
     const createInitializedCommitments = (
       wallets: Map<string, Wallet> = new Map(),
@@ -1781,6 +1797,467 @@ describe('Commitments', () => {
       await expect(
         commitments.commit(networks.Ethereum.symbol, id, signature, tx.hash),
       ).rejects.toThrow('commitment exists already');
+    });
+
+    test('should throw when the swap already has a lockup transaction', async () => {
+      const commitments = createInitializedCommitments();
+      const etherSwapAddress = await etherSwap.getAddress();
+      const claimAddress = await setup.signer.getAddress();
+
+      const expectedAmount = 1;
+      const timelock = (await setup.provider.getBlockNumber()) + 1000;
+
+      const { id, preimageHash } = await createSwap(
+        etherSwapAddress,
+        expectedAmount,
+        timelock - 100,
+      );
+
+      const amount = BigInt(expectedAmount) * etherDecimals;
+
+      const normalLockup = await etherSwap['lock(bytes32,address,uint256)'](
+        preimageHash,
+        claimAddress,
+        timelock,
+        { value: amount, nonce: await getSignerNonce() },
+      );
+      await normalLockup.wait(1);
+
+      await SwapRepository.setLockupTransaction(
+        (await SwapRepository.getSwap({ id }))!,
+        normalLockup.hash,
+        expectedAmount,
+        SwapUpdateEvent.TransactionConfirmed,
+        await lockupLogIndex(etherSwap, normalLockup.hash),
+      );
+
+      const tx = await etherSwap['lock(bytes32,address,uint256)'](
+        zeroPreimageHash,
+        claimAddress,
+        timelock,
+        { value: amount, nonce: await getSignerNonce() },
+      );
+      await tx.wait(1);
+
+      const signature = await setup.signer.signTypedData(
+        await getEtherSwapDomain(setup.provider, etherSwap),
+        etherSwapCommitTypes,
+        {
+          preimageHash,
+          amount,
+          claimAddress,
+          refundAddress: claimAddress,
+          timelock,
+        },
+      );
+
+      await expect(
+        commitments.commit(networks.Ethereum.symbol, id, signature, tx.hash),
+      ).rejects.toThrow('swap has a lockup transaction already');
+
+      expect(await CommitmentRepository.getBySwapId(id)).toBeNull();
+      expect(eventHandler.handleEvent).not.toHaveBeenCalled();
+    });
+
+    test('should throw when the chain swap already has a lockup transaction', async () => {
+      const commitments = createInitializedCommitments();
+      const etherSwapAddress = await etherSwap.getAddress();
+      const claimAddress = await setup.signer.getAddress();
+
+      const expectedAmount = 100_000;
+      const timelock = (await setup.provider.getBlockNumber()) + 1000;
+
+      const { id, preimageHash } = await createChainSwap(
+        etherSwapAddress,
+        'ETH',
+        expectedAmount,
+        timelock - 100,
+      );
+
+      const amount = BigInt(expectedAmount) * etherDecimals;
+
+      const normalLockup = await etherSwap['lock(bytes32,address,uint256)'](
+        preimageHash,
+        claimAddress,
+        timelock,
+        { value: amount, nonce: await getSignerNonce() },
+      );
+      await normalLockup.wait(1);
+
+      await ChainSwapRepository.setUserLockupTransaction(
+        (await ChainSwapRepository.getChainSwap({ id }))!,
+        normalLockup.hash,
+        expectedAmount,
+        SwapUpdateEvent.TransactionConfirmed,
+        await lockupLogIndex(etherSwap, normalLockup.hash),
+      );
+
+      const dustAmount = 1n;
+      const tx = await etherSwap['lock(bytes32,address,uint256)'](
+        zeroPreimageHash,
+        claimAddress,
+        timelock,
+        { value: dustAmount, nonce: await getSignerNonce() },
+      );
+      await tx.wait(1);
+
+      const signature = await setup.signer.signTypedData(
+        await getEtherSwapDomain(setup.provider, etherSwap),
+        etherSwapCommitTypes,
+        {
+          preimageHash,
+          amount: dustAmount,
+          claimAddress,
+          refundAddress: claimAddress,
+          timelock,
+        },
+      );
+
+      await expect(
+        commitments.commit(networks.Ethereum.symbol, id, signature, tx.hash),
+      ).rejects.toThrow('swap has a lockup transaction already');
+
+      expect(await CommitmentRepository.getBySwapId(id)).toBeNull();
+      expect(eventHandler.handleEvent).not.toHaveBeenCalled();
+    });
+
+    test('should throw when the ERC20 chain swap already has a lockup transaction', async () => {
+      const symbol = 'USDT';
+      const { provider, wallets } = await createErc20Wallet(symbol);
+      const commitments = createInitializedCommitments(wallets);
+      const erc20SwapAddress = await erc20Swap.getAddress();
+      const claimAddress = await setup.signer.getAddress();
+      const tokenAddress = await token.getAddress();
+
+      const expectedAmount = 37_540;
+      const timelock = (await setup.provider.getBlockNumber()) + 1000;
+      const { id, preimageHash } = await createChainSwap(
+        erc20SwapAddress,
+        symbol,
+        expectedAmount,
+        timelock - 100,
+      );
+
+      const amount = provider.formatTokenAmount(expectedAmount);
+      const dustAmount = 1n;
+
+      const approveTx = await token.approve(
+        erc20SwapAddress,
+        amount + dustAmount,
+        {
+          nonce: await getSignerNonce(),
+        },
+      );
+      await approveTx.wait(1);
+
+      const normalLockup = await erc20Swap[
+        'lock(bytes32,uint256,address,address,uint256)'
+      ](preimageHash, amount, tokenAddress, claimAddress, timelock, {
+        nonce: await getSignerNonce(),
+      });
+      await normalLockup.wait(1);
+
+      await ChainSwapRepository.setUserLockupTransaction(
+        (await ChainSwapRepository.getChainSwap({ id }))!,
+        normalLockup.hash,
+        expectedAmount,
+        SwapUpdateEvent.TransactionConfirmed,
+        await lockupLogIndex(erc20Swap, normalLockup.hash),
+      );
+
+      const tx = await erc20Swap[
+        'lock(bytes32,uint256,address,address,uint256)'
+      ](zeroPreimageHash, dustAmount, tokenAddress, claimAddress, timelock, {
+        nonce: await getSignerNonce(),
+      });
+      await tx.wait(1);
+
+      const signature = await setup.signer.signTypedData(
+        await getErc20SwapDomain(setup.provider, erc20Swap),
+        erc20SwapCommitTypes,
+        {
+          preimageHash,
+          tokenAddress,
+          claimAddress,
+          timelock,
+          amount: dustAmount,
+          refundAddress: claimAddress,
+        },
+      );
+
+      await expect(
+        commitments.commit(symbol, id, signature, tx.hash),
+      ).rejects.toThrow('swap has a lockup transaction already');
+
+      expect(await CommitmentRepository.getBySwapId(id)).toBeNull();
+      expect(eventHandler.handleEvent).not.toHaveBeenCalled();
+    });
+
+    test('should not create a commitment when a lockup is acquired mid commit', async () => {
+      const commitments = createInitializedCommitments();
+      const etherSwapAddress = await etherSwap.getAddress();
+      const claimAddress = await setup.signer.getAddress();
+
+      const expectedAmount = 1;
+      const timelock = (await setup.provider.getBlockNumber()) + 1000;
+
+      const { id, preimageHash } = await createSwap(
+        etherSwapAddress,
+        expectedAmount,
+        timelock - 100,
+      );
+
+      const amount = BigInt(expectedAmount) * etherDecimals;
+
+      const competing = await etherSwap['lock(bytes32,address,uint256)'](
+        preimageHash,
+        claimAddress,
+        timelock,
+        { value: amount, nonce: await getSignerNonce() },
+      );
+      await competing.wait(1);
+      const competingIndex = await lockupLogIndex(etherSwap, competing.hash);
+
+      const tx = await etherSwap['lock(bytes32,address,uint256)'](
+        zeroPreimageHash,
+        claimAddress,
+        timelock,
+        { value: amount, nonce: await getSignerNonce() },
+      );
+      await tx.wait(1);
+
+      const signature = await setup.signer.signTypedData(
+        await getEtherSwapDomain(setup.provider, etherSwap),
+        etherSwapCommitTypes,
+        {
+          preimageHash,
+          amount,
+          claimAddress,
+          refundAddress: claimAddress,
+          timelock,
+        },
+      );
+
+      const original = CommitmentRepository.getByLockupHash;
+      const spy = jest
+        .spyOn(CommitmentRepository, 'getByLockupHash')
+        .mockImplementationOnce(async (lockupHash: string) => {
+          await SwapRepository.setLockupTransaction(
+            (await SwapRepository.getSwap({ id }))!,
+            competing.hash,
+            expectedAmount,
+            SwapUpdateEvent.TransactionConfirmed,
+            competingIndex,
+          );
+          return await original(lockupHash);
+        });
+
+      await expect(
+        commitments.commit(networks.Ethereum.symbol, id, signature, tx.hash),
+      ).rejects.toThrow('swap has a lockup transaction already');
+
+      spy.mockRestore();
+
+      expect(await CommitmentRepository.getBySwapId(id)).toBeNull();
+
+      const swap = (await SwapRepository.getSwap({ id }))!;
+      expect(swap.lockupTransactionId).toEqual(competing.hash);
+      expect(swap.lockupTransactionVout).toEqual(competingIndex);
+    });
+
+    test('should keep the commitment lockup when another lockup arrives later', async () => {
+      const commitments = createInitializedCommitments();
+      const etherSwapAddress = await etherSwap.getAddress();
+      const claimAddress = await setup.signer.getAddress();
+
+      const expectedAmount = 1;
+      const timelock = (await setup.provider.getBlockNumber()) + 1000;
+
+      const { id, preimageHash } = await createSwap(
+        etherSwapAddress,
+        expectedAmount,
+        timelock - 100,
+      );
+
+      const amount = BigInt(expectedAmount) * etherDecimals;
+
+      const tx = await etherSwap['lock(bytes32,address,uint256)'](
+        zeroPreimageHash,
+        claimAddress,
+        timelock,
+        { value: amount, nonce: await getSignerNonce() },
+      );
+      await tx.wait(1);
+      const commitmentIndex = await lockupLogIndex(etherSwap, tx.hash);
+
+      const signature = await setup.signer.signTypedData(
+        await getEtherSwapDomain(setup.provider, etherSwap),
+        etherSwapCommitTypes,
+        {
+          preimageHash,
+          amount,
+          claimAddress,
+          refundAddress: claimAddress,
+          timelock,
+        },
+      );
+
+      await commitments.commit(
+        networks.Ethereum.symbol,
+        id,
+        signature,
+        tx.hash,
+      );
+
+      const reserved = (await SwapRepository.getSwap({ id }))!;
+      expect(reserved.lockupTransactionId).toEqual(tx.hash);
+      expect(reserved.lockupTransactionVout).toEqual(commitmentIndex);
+      expect(reserved.status).toEqual(SwapUpdateEvent.SwapCreated);
+
+      const competing = await etherSwap['lock(bytes32,address,uint256)'](
+        preimageHash,
+        claimAddress,
+        timelock,
+        { value: amount, nonce: await getSignerNonce() },
+      );
+      await competing.wait(1);
+
+      const result = await SwapRepository.setLockupTransaction(
+        reserved,
+        competing.hash,
+        expectedAmount,
+        SwapUpdateEvent.TransactionConfirmed,
+        await lockupLogIndex(etherSwap, competing.hash),
+      );
+      expect(result.outcome).toEqual(LockupWriteOutcome.Rejected);
+
+      const after = (await SwapRepository.getSwap({ id }))!;
+      expect(after.lockupTransactionId).toEqual(tx.hash);
+      expect(after.lockupTransactionVout).toEqual(commitmentIndex);
+    });
+
+    test('should store the canonical hash when a mixed case one is submitted', async () => {
+      const commitments = createInitializedCommitments();
+      const etherSwapAddress = await etherSwap.getAddress();
+      const claimAddress = await setup.signer.getAddress();
+
+      const expectedAmount = 1;
+      const timelock = (await setup.provider.getBlockNumber()) + 1000;
+
+      const { id, preimageHash } = await createSwap(
+        etherSwapAddress,
+        expectedAmount,
+        timelock - 100,
+      );
+
+      const amount = BigInt(expectedAmount) * etherDecimals;
+
+      const tx = await etherSwap['lock(bytes32,address,uint256)'](
+        zeroPreimageHash,
+        claimAddress,
+        timelock,
+        { value: amount, nonce: await getSignerNonce() },
+      );
+      await tx.wait(1);
+      const commitmentIndex = await lockupLogIndex(etherSwap, tx.hash);
+
+      const signature = await setup.signer.signTypedData(
+        await getEtherSwapDomain(setup.provider, etherSwap),
+        etherSwapCommitTypes,
+        {
+          preimageHash,
+          amount,
+          claimAddress,
+          refundAddress: claimAddress,
+          timelock,
+        },
+      );
+
+      const mixedCaseHash = `0x${tx.hash.slice(2).toUpperCase()}`;
+      expect(mixedCaseHash).not.toEqual(tx.hash);
+
+      await commitments.commit(
+        networks.Ethereum.symbol,
+        id,
+        signature,
+        mixedCaseHash,
+      );
+
+      const commitment = await CommitmentRepository.getBySwapId(id);
+      expect(commitment!.transactionHash).toEqual(tx.hash);
+
+      const swap = (await SwapRepository.getSwap({ id }))!;
+      expect(swap.lockupTransactionId).toEqual(tx.hash);
+
+      expect(eventHandler.handleEvent).toHaveBeenCalledWith(
+        'eth.lockup',
+        expect.objectContaining({
+          transaction: expect.objectContaining({ hash: tx.hash }),
+        }),
+      );
+
+      const result = await SwapRepository.setLockupTransaction(
+        swap,
+        tx.hash,
+        expectedAmount,
+        SwapUpdateEvent.TransactionConfirmed,
+        commitmentIndex,
+      );
+      expect(result.outcome).toEqual(LockupWriteOutcome.Idempotent);
+      expect(result.swap.status).toEqual(SwapUpdateEvent.TransactionConfirmed);
+    });
+
+    test('should not reserve the lockup when the transaction disappears', async () => {
+      const commitments = createInitializedCommitments();
+      const etherSwapAddress = await etherSwap.getAddress();
+      const claimAddress = await setup.signer.getAddress();
+
+      const expectedAmount = 1;
+      const timelock = (await setup.provider.getBlockNumber()) + 1000;
+
+      const { id, preimageHash } = await createSwap(
+        etherSwapAddress,
+        expectedAmount,
+        timelock - 100,
+      );
+
+      const amount = BigInt(expectedAmount) * etherDecimals;
+
+      const tx = await etherSwap['lock(bytes32,address,uint256)'](
+        zeroPreimageHash,
+        claimAddress,
+        timelock,
+        { value: amount, nonce: await getSignerNonce() },
+      );
+      await tx.wait(1);
+
+      const signature = await setup.signer.signTypedData(
+        await getEtherSwapDomain(setup.provider, etherSwap),
+        etherSwapCommitTypes,
+        {
+          preimageHash,
+          amount,
+          claimAddress,
+          refundAddress: claimAddress,
+          timelock,
+        },
+      );
+
+      const getTransaction = jest
+        .spyOn(setup.provider, 'getTransaction')
+        .mockResolvedValueOnce(null);
+
+      await expect(
+        commitments.commit(networks.Ethereum.symbol, id, signature, tx.hash),
+      ).rejects.toThrow('transaction not found');
+
+      getTransaction.mockRestore();
+
+      expect(await CommitmentRepository.getBySwapId(id)).toBeNull();
+
+      const swap = (await SwapRepository.getSwap({ id }))!;
+      expect(swap.lockupTransactionId).toBeNull();
+      expect(swap.lockupTransactionVout).toBeNull();
     });
 
     test('should throw when signature is invalid', async () => {

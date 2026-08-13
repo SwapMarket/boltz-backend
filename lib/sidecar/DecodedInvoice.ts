@@ -147,6 +147,21 @@ class DecodedInvoice {
     );
   }
 
+  public get guaranteedFinalCltv(): number {
+    const paths = this.decoded.bolt12Invoice?.paths;
+    if (paths === undefined || paths.length === 0) {
+      return this.minFinalCltv;
+    }
+
+    return paths.reduce(
+      (min, current) =>
+        fromProtoInt(current.cltvExpiryDelta) < min
+          ? fromProtoInt(current.cltvExpiryDelta)
+          : min,
+      Number.MAX_SAFE_INTEGER,
+    );
+  }
+
   public get description(): string | undefined {
     return (
       this.decoded.bolt11?.memo ||

@@ -1,7 +1,9 @@
+import { sha256 } from '@noble/hashes/sha2.js';
 import { Transaction } from '@scure/btc-signer';
 import { EventEmitter } from 'events';
 import { Op } from 'sequelize';
 import Logger from '../../../lib/Logger';
+import { getHexString } from '../../../lib/Utils';
 import {
   CurrencyType,
   OrderSide,
@@ -19,6 +21,7 @@ import SendApprovalHoldRepository from '../../../lib/db/repositories/SendApprova
 import SwapRepository from '../../../lib/db/repositories/SwapRepository';
 import WrappedSwapRepository from '../../../lib/db/repositories/WrappedSwapRepository';
 import type { LightningClient } from '../../../lib/lightning/LightningClient';
+import NoExistingPaymentActionError from '../../../lib/lightning/NoExistingPaymentActionError';
 import type NotificationClient from '../../../lib/notifications/NotificationClient';
 import { Signer } from '../../../lib/proto/boltzrpc';
 import SignerControlRegistry from '../../../lib/service/SignerControlRegistry';
@@ -287,6 +290,275 @@ describe('SwapNursery', () => {
 
     jest.clearAllTimers();
     jest.useRealTimers();
+  });
+
+  test('should keep settling swaps when settling one of them throws', async () => {
+    jest.useFakeTimers();
+
+    const failing = {
+      id: 'failing-swap',
+      type: SwapType.Submarine,
+      pair: 'BTC/BTC',
+      orderSide: OrderSide.BUY,
+      timeoutBlockHeight: 100,
+    } as any;
+    const succeeding = {
+      id: 'succeeding-swap',
+      type: SwapType.Submarine,
+      pair: 'BTC/BTC',
+      orderSide: OrderSide.BUY,
+      timeoutBlockHeight: 200,
+    } as any;
+
+    (SwapRepository.getSwaps as jest.Mock).mockResolvedValueOnce([
+      failing,
+      succeeding,
+    ]);
+
+    const retryNursery = new SwapNursery(
+      mockLogger,
+      {} as any,
+      mockNotifications,
+      {} as any,
+      {} as any,
+      {} as any,
+      mockWalletManager,
+      {} as any,
+      1,
+      mockClaimer,
+      mockChainSwapSigner,
+      {} as any,
+      {} as any,
+    );
+    retryNursery.currencies = new Map([['BTC', mockCurrency]]);
+
+    const attemptSettleSwap = jest
+      .spyOn(retryNursery, 'attemptSettleSwap')
+      .mockRejectedValueOnce('no good')
+      .mockResolvedValue(undefined);
+
+    await retryNursery.init([mockCurrency]);
+    await jest.advanceTimersByTimeAsync(1_000);
+
+    expect(attemptSettleSwap).toHaveBeenCalledTimes(2);
+    expect(attemptSettleSwap).toHaveBeenNthCalledWith(1, mockCurrency, failing);
+    expect(attemptSettleSwap).toHaveBeenNthCalledWith(
+      2,
+      mockCurrency,
+      succeeding,
+    );
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      'Could not settle Swap failing-swap: no good',
+    );
+
+    jest.clearAllTimers();
+    jest.useRealTimers();
+  });
+
+  test('should settle the swaps closest to their timeout first', async () => {
+    jest.useFakeTimers();
+
+    const later = {
+      id: 'later-swap',
+      type: SwapType.Submarine,
+      pair: 'BTC/BTC',
+      orderSide: OrderSide.BUY,
+      timeoutBlockHeight: 200,
+    } as any;
+    const sooner = {
+      id: 'sooner-swap',
+      type: SwapType.Submarine,
+      pair: 'BTC/BTC',
+      orderSide: OrderSide.BUY,
+      timeoutBlockHeight: 100,
+    } as any;
+
+    (SwapRepository.getSwaps as jest.Mock).mockResolvedValueOnce([
+      later,
+      sooner,
+    ]);
+
+    const retryNursery = new SwapNursery(
+      mockLogger,
+      {} as any,
+      mockNotifications,
+      {} as any,
+      {} as any,
+      {} as any,
+      mockWalletManager,
+      {} as any,
+      1,
+      mockClaimer,
+      mockChainSwapSigner,
+      {} as any,
+      {} as any,
+    );
+    retryNursery.currencies = new Map([['BTC', mockCurrency]]);
+
+    const attemptSettleSwap = jest
+      .spyOn(retryNursery, 'attemptSettleSwap')
+      .mockResolvedValue(undefined);
+
+    await retryNursery.init([mockCurrency]);
+    await jest.advanceTimersByTimeAsync(1_000);
+
+    expect(attemptSettleSwap).toHaveBeenNthCalledWith(1, mockCurrency, sooner);
+    expect(attemptSettleSwap).toHaveBeenNthCalledWith(2, mockCurrency, later);
+
+    jest.clearAllTimers();
+    jest.useRealTimers();
+  });
+
+  describe('byExpiryUrgency', () => {
+    const makeSwap = (id: string, pair: string, timeoutBlockHeight: number) =>
+      ({
+        id,
+        pair,
+        orderSide: OrderSide.BUY,
+        timeoutBlockHeight,
+      }) as any;
+
+    const order = (swaps: any[]): string[] =>
+      (SwapNursery as any)
+        .byExpiryUrgency(swaps)
+        .map((swap: any) => swap.id as string);
+
+    test('should return an empty array for no swaps', () => {
+      expect(order([])).toEqual([]);
+    });
+
+    test('should sort swaps of a chain by their timeout', () => {
+      expect(
+        order([
+          makeSwap('last', 'BTC/BTC', 300),
+          makeSwap('first', 'BTC/BTC', 100),
+          makeSwap('second', 'BTC/BTC', 200),
+        ]),
+      ).toEqual(['first', 'second', 'last']);
+    });
+
+    test('should interleave the chains to not starve one of them', () => {
+      expect(
+        order([
+          makeSwap('btc-late', 'BTC/BTC', 900_002),
+          makeSwap('lbtc-late', 'BTC/L-BTC', 3_000_002),
+          makeSwap('btc-early', 'BTC/BTC', 900_001),
+          makeSwap('lbtc-early', 'BTC/L-BTC', 3_000_001),
+        ]),
+      ).toEqual(['btc-early', 'lbtc-early', 'btc-late', 'lbtc-late']);
+    });
+
+    test('should append the remainder of the longer chain', () => {
+      expect(
+        order([
+          makeSwap('btc-one', 'BTC/BTC', 900_001),
+          makeSwap('btc-two', 'BTC/BTC', 900_002),
+          makeSwap('lbtc-one', 'BTC/L-BTC', 3_000_001),
+        ]),
+      ).toEqual(['btc-one', 'lbtc-one', 'btc-two']);
+    });
+  });
+
+  describe('invoice payment collateral authorization', () => {
+    const pendingSwap = {
+      id: 'pending-invalid-collateral',
+      type: SwapType.Submarine,
+      pair: 'BTC/BTC',
+      orderSide: OrderSide.BUY,
+      invoice: 'lnbcrt1',
+      status: SwapUpdateEvent.InvoicePending,
+      expectedAmount: 100_000,
+      onchainAmount: 0,
+    } as unknown as Swap;
+
+    let payInvoice: jest.Mock;
+
+    beforeEach(() => {
+      payInvoice = jest.fn();
+      (swapNursery as any).paymentHandler = { payInvoice };
+    });
+
+    test.each([
+      ['zero', 100_000, 0],
+      ['missing', null, null],
+      ['insufficient', 100_000, 99_999],
+    ])(
+      'should leave an effect-free InvoicePending swap with %s collateral recovery-only',
+      async (_name, expectedAmount, onchainAmount) => {
+        const swap = {
+          ...pendingSwap,
+          expectedAmount,
+          onchainAmount,
+        } as Swap;
+        mockGetSwapResult = swap;
+        payInvoice.mockRejectedValueOnce(new NoExistingPaymentActionError());
+
+        await expect(
+          (swapNursery as any).payInvoice(swap),
+        ).resolves.toBeUndefined();
+
+        expect(payInvoice).toHaveBeenCalledWith(swap, false);
+        expect(SendApprovalHoldRepository.remove).not.toHaveBeenCalled();
+        expect(SwapRepository.setSwapStatus).not.toHaveBeenCalled();
+      },
+    );
+
+    test('should preserve an exact pending Lightning payment recovery', async () => {
+      const preimage = Buffer.alloc(32, 1);
+      payInvoice.mockResolvedValueOnce(preimage);
+
+      await expect(
+        (swapNursery as any).payInvoice(pendingSwap),
+      ).resolves.toEqual({ preimage });
+
+      expect(payInvoice).toHaveBeenCalledWith(pendingSwap, false);
+      expect(SwapRepository.setSwapStatus).not.toHaveBeenCalled();
+    });
+
+    test('should not mutate a stale InvoicePending swap when recovery advances concurrently', async () => {
+      payInvoice.mockRejectedValueOnce(new NoExistingPaymentActionError());
+
+      await expect(
+        (swapNursery as any).payInvoice(pendingSwap),
+      ).resolves.toBeUndefined();
+
+      expect(SendApprovalHoldRepository.remove).not.toHaveBeenCalled();
+      expect(SwapRepository.setSwapStatus).not.toHaveBeenCalled();
+    });
+
+    test('should allow a new payment with sufficient positive collateral', async () => {
+      const swap = {
+        ...pendingSwap,
+        status: SwapUpdateEvent.TransactionConfirmed,
+        onchainAmount: pendingSwap.expectedAmount,
+      } as Swap;
+      const preimage = Buffer.alloc(32, 2);
+      payInvoice.mockResolvedValueOnce(preimage);
+
+      await expect((swapNursery as any).payInvoice(swap)).resolves.toEqual({
+        preimage,
+      });
+
+      expect(payInvoice).toHaveBeenCalledWith(swap, true);
+      expect(SwapRepository.setSwapStatus).not.toHaveBeenCalled();
+    });
+
+    test('should recover a valid preimage already persisted by InvoicePaid', async () => {
+      const preimage = Buffer.alloc(32, 3);
+      const swap = {
+        ...pendingSwap,
+        status: SwapUpdateEvent.InvoicePaid,
+        preimage: preimage.toString('hex'),
+        preimageHash: Buffer.from(sha256(preimage)).toString('hex'),
+      } as Swap;
+
+      await expect((swapNursery as any).payInvoice(swap)).resolves.toEqual({
+        preimage,
+      });
+
+      expect(payInvoice).not.toHaveBeenCalled();
+      expect(SwapRepository.setSwapStatus).not.toHaveBeenCalled();
+    });
   });
 
   describe('signer lockup guards', () => {
@@ -2049,10 +2321,13 @@ describe('SwapNursery', () => {
         pair: 'BTC/BTC',
         type: SwapType.Submarine,
         orderSide: OrderSide.BUY,
+        status: SwapUpdateEvent.TransactionConfirmed,
         invoice: 'lnbcrt1',
         createdRefundSignature: false,
         lockupTransactionId: '0xsubmarine',
         lockupTransactionVout: 2,
+        expectedAmount: 100_000,
+        onchainAmount: 100_000,
       } as unknown as Swap;
       mockGetSwapResult = submarineSwap;
       (swapNursery as any).sendApprovalHook = { hook: jest.fn() };
@@ -2074,6 +2349,56 @@ describe('SwapNursery', () => {
         submarineSwap,
       );
     });
+
+    test.each([
+      ['zero collateral', 0],
+      ['insufficient collateral', 99_999],
+      ['missing collateral', null],
+    ])(
+      'should not settle an EVM submarine swap with %s',
+      async (_name, onchainAmount) => {
+        const listeners: Record<string, (...args: any[]) => Promise<void>> = {};
+        const ethereumNursery = {
+          on: jest.fn(
+            (event: string, callback: (...args: any[]) => Promise<void>) => {
+              listeners[event] = callback;
+            },
+          ),
+          init: jest.fn().mockResolvedValue(undefined),
+        } as any;
+        const submarineSwap = {
+          id: 'submarine-swap-id',
+          pair: 'BTC/BTC',
+          type: SwapType.Submarine,
+          orderSide: OrderSide.BUY,
+          status: SwapUpdateEvent.TransactionConfirmed,
+          invoice: 'lnbcrt1',
+          createdRefundSignature: false,
+          lockupTransactionId: '0xsubmarine',
+          lockupTransactionVout: 2,
+          expectedAmount: 100_000,
+          onchainAmount,
+        } as unknown as Swap;
+        mockGetSwapResult = submarineSwap;
+        const attemptSettleSwapSpy = jest
+          .spyOn(swapNursery, 'attemptSettleSwap')
+          .mockResolvedValue(undefined);
+
+        await (swapNursery as any).listenEthereumNursery(ethereumNursery);
+        await listeners['erc20.lockup']({
+          swap: submarineSwap,
+          transactionHash: '0xsubmarine',
+          logIndex: 2,
+        });
+
+        expect(attemptSettleSwapSpy).not.toHaveBeenCalled();
+        expect(SwapRepository.setSwapStatus).toHaveBeenCalledWith(
+          submarineSwap,
+          SwapUpdateEvent.TransactionLockupFailed,
+          expect.any(String),
+        );
+      },
+    );
 
     test('should not pay when the recorded lockup does not match the event transaction', async () => {
       const listeners: Record<string, (...args: any[]) => Promise<void>> = {};
@@ -2185,6 +2510,8 @@ describe('SwapNursery', () => {
         invoice: 'lnbc123...',
         lockupTransactionId: 'event-owner',
         lockupTransactionVout: 0,
+        expectedAmount: 100_000,
+        onchainAmount: 100_000,
       };
 
       mockTransaction = {
@@ -2279,6 +2606,56 @@ describe('SwapNursery', () => {
       expect(mockPayInvoice).not.toHaveBeenCalled();
       expect(mockClaimUtxo).not.toHaveBeenCalled();
       expect(mockSetSwapRate).toHaveBeenCalledWith(swapWithoutInvoice);
+    });
+
+    test.each([
+      ['zero collateral', 0],
+      ['insufficient collateral', 99_999],
+      ['missing collateral', null],
+    ])('should not pay with %s', async (_name, onchainAmount) => {
+      mockGetSwapResult = {
+        ...baseMockSwap,
+        onchainAmount,
+      };
+
+      (swapNursery as any).utxoNursery.emit('swap.lockup', {
+        swap: baseMockSwap,
+        transaction: mockTransaction,
+        lockupTransactionVout: baseMockSwap.lockupTransactionVout,
+        confirmed: true,
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(mockPayInvoice).not.toHaveBeenCalled();
+      expect(mockClaimUtxo).not.toHaveBeenCalled();
+      expect(SwapRepository.setSwapStatus).toHaveBeenCalledWith(
+        mockGetSwapResult,
+        SwapUpdateEvent.TransactionLockupFailed,
+        expect.any(String),
+      );
+    });
+
+    test('should preserve recovery after the Lightning payment succeeded', async () => {
+      mockGetSwapResult = {
+        ...baseMockSwap,
+        status: SwapUpdateEvent.InvoicePaid,
+        expectedAmount: null,
+        onchainAmount: null,
+      };
+
+      (swapNursery as any).utxoNursery.emit('swap.lockup', {
+        swap: baseMockSwap,
+        transaction: mockTransaction,
+        lockupTransactionVout: baseMockSwap.lockupTransactionVout,
+        confirmed: true,
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(mockPayInvoice).toHaveBeenCalledWith(mockGetSwapResult);
+      expect(mockClaimUtxo).toHaveBeenCalled();
+      expect(SwapRepository.setSwapStatus).not.toHaveBeenCalled();
     });
 
     test('should return early when fetched swap is null', async () => {
@@ -2533,6 +2910,8 @@ describe('SwapNursery', () => {
         status: SwapUpdateEvent.TransactionConfirmed,
         lockupTransactionId: 'ark-lockup-id',
         lockupTransactionVout: 1,
+        expectedAmount: 100_000,
+        onchainAmount: 100_000,
       };
 
       mockPayInvoice = jest
@@ -2589,6 +2968,29 @@ describe('SwapNursery', () => {
         Buffer.from('preimage'),
       );
       expect(mockSetSwapRate).not.toHaveBeenCalled();
+    });
+
+    test('should not pay with zero ARK collateral', async () => {
+      mockGetSwapResult = {
+        ...baseMockSwap,
+        onchainAmount: 0,
+      };
+
+      (swapNursery as any).arkNursery.emit('swap.lockup', {
+        swap: baseMockSwap,
+        lockupTransactionId: 'ark-lockup-id',
+        lockupTransactionVout: baseMockSwap.lockupTransactionVout,
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(mockPayInvoice).not.toHaveBeenCalled();
+      expect(mockClaimVtxo).not.toHaveBeenCalled();
+      expect(SwapRepository.setSwapStatus).toHaveBeenCalledWith(
+        mockGetSwapResult,
+        SwapUpdateEvent.TransactionLockupFailed,
+        expect.any(String),
+      );
     });
 
     test('should ignore duplicate ARK lockup notifications after processing started', async () => {
@@ -2723,6 +3125,43 @@ describe('SwapNursery', () => {
         deferClaim: jest.fn().mockResolvedValue(true),
       };
       jest.spyOn(swapNursery, 'emit');
+    });
+
+    test('should not pay again when the preimage was persisted already', async () => {
+      const swap = {
+        id: 'paid-submarine-swap',
+        type: SwapType.Submarine,
+        status: SwapUpdateEvent.InvoicePaid,
+        preimage: getHexString(mockPreimage),
+      } as unknown as Swap;
+      mockGetSwapResult = swap;
+
+      const payInvoice = jest.spyOn(swapNursery as any, 'payInvoice');
+
+      await swapNursery.attemptSettleSwap(mockCurrency, swap);
+
+      expect(payInvoice).not.toHaveBeenCalled();
+      expect((swapNursery as any).claimer.deferClaim).toHaveBeenCalledWith(
+        swap,
+        mockPreimage,
+      );
+    });
+
+    test('should pay the invoice when no preimage was persisted', async () => {
+      const swap = {
+        id: 'pending-submarine-swap',
+        type: SwapType.Submarine,
+        status: SwapUpdateEvent.InvoicePending,
+      } as unknown as Swap;
+      mockGetSwapResult = swap;
+
+      const payInvoice = jest
+        .spyOn(swapNursery as any, 'payInvoice')
+        .mockResolvedValue(undefined);
+
+      await swapNursery.attemptSettleSwap(mockCurrency, swap);
+
+      expect(payInvoice).toHaveBeenCalledWith(swap);
     });
 
     test('should skip settlement when the chain swap was claimed already', async () => {

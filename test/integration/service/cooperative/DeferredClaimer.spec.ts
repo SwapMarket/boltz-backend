@@ -1444,6 +1444,101 @@ describe('DeferredClaimer', () => {
 
       btcCurrency.chainClient!.sendRawTransaction = sendRawTransaction;
     });
+
+    test('should fall back when the recorded log index of a commitment is stale', async () => {
+      const warn = jest.spyOn(Logger.disabledLogger, 'warn');
+
+      const nonce = await ethereumSetup.signer.getNonce();
+      const { swap, preimage } = await lockupTokenCommitment(nonce);
+
+      const receipt = await ethereumSetup.provider.getTransactionReceipt(
+        swap.lockupTransactionId!,
+      );
+      const lockupTopic =
+        contracts.erc20Swap.interface.getEvent('Lockup').topicHash;
+      const transferLog = receipt!.logs.find(
+        (log) => log.topics[0] !== lockupTopic,
+      )!;
+      swap.lockupTransactionVout = transferLog.index;
+
+      await claimer.deferClaim(swap, preimage);
+      await claimer.sweepSymbol('TRC');
+
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining(`Recorded log index ${transferLog.index}`),
+      );
+      expect(
+        await contracts.erc20Swap.queryFilter(
+          contracts.erc20Swap.filters.Claim(getHexBuffer(swap.preimageHash)),
+        ),
+      ).toHaveLength(1);
+
+      warn.mockRestore();
+    });
+
+    test('should not claim a commitment that is not the recorded lockup', async () => {
+      const nonce = await ethereumSetup.signer.getNonce();
+      const { swap, preimage } = await lockupTokenCommitment(nonce);
+
+      const commitment = (await CommitmentRepository.getBySwapId(swap.id))!;
+      const claimAddress = await ethereumSetup.signer.getAddress();
+
+      const receipt = await ethereumSetup.provider.getTransactionReceipt(
+        swap.lockupTransactionId!,
+      );
+      const competingIndex =
+        Math.max(...receipt!.logs.map((log) => log.index)) + 1;
+      const competing = contracts.erc20Swap.interface.encodeEventLog('Lockup', [
+        getHexBuffer(swap.preimageHash),
+        1n,
+        await contracts.token.getAddress(),
+        claimAddress,
+        claimAddress,
+        swap.timeoutBlockHeight,
+      ]);
+      const logs = [
+        ...receipt!.logs,
+        {
+          topics: competing.topics,
+          data: competing.data,
+          index: competingIndex,
+          address: await contracts.erc20Swap.getAddress(),
+        },
+      ];
+
+      const original = ethereumSetup.provider.getTransactionReceipt.bind(
+        ethereumSetup.provider,
+      );
+      const getTransactionReceipt = jest
+        .spyOn(ethereumSetup.provider, 'getTransactionReceipt')
+        .mockImplementation(async (hash: string) =>
+          hash === swap.lockupTransactionId
+            ? ({ logs } as any)
+            : await original(hash),
+        );
+
+      swap.lockupTransactionVout = competingIndex;
+
+      await claimer.deferClaim(swap, preimage);
+      await expect(claimer.sweepSymbol('TRC')).rejects.toEqual(
+        expect.objectContaining({
+          message: expect.stringContaining('lockup transaction is invalid'),
+        }),
+      );
+
+      getTransactionReceipt.mockRestore();
+
+      expect(await contracts.erc20Swap.swaps(commitment.lockupHash)).toEqual(
+        true,
+      );
+      expect(
+        await contracts.erc20Swap.queryFilter(
+          contracts.erc20Swap.filters.Claim(getHexBuffer(swap.preimageHash)),
+        ),
+      ).toHaveLength(0);
+
+      claimer['swapsToClaim'].get('TRC')!.clear();
+    });
   });
 
   test('should claim leftovers on startup', async () => {

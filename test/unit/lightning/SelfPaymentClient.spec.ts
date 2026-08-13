@@ -2,6 +2,7 @@ import { randomBytes } from 'crypto';
 import Logger from '../../../lib/Logger';
 import { formatError, getHexBuffer, getHexString } from '../../../lib/Utils';
 import {
+  CurrencyType,
   OrderSide,
   SwapType,
   SwapUpdateEvent,
@@ -21,6 +22,7 @@ import PendingPaymentTracker from '../../../lib/lightning/PendingPaymentTracker'
 import SelfPaymentClient from '../../../lib/lightning/SelfPaymentClient';
 import { Signer } from '../../../lib/proto/boltzrpc';
 import SignerControlRegistry from '../../../lib/service/SignerControlRegistry';
+import TimeoutDeltaProvider from '../../../lib/service/TimeoutDeltaProvider';
 import LightningNursery from '../../../lib/swap/LightningNursery';
 import type SwapNursery from '../../../lib/swap/SwapNursery';
 
@@ -36,6 +38,7 @@ describe('SelfPaymentClient', () => {
 
   let nursery: SwapNursery;
   let client: SelfPaymentClient;
+  let timeoutDeltaProvider: TimeoutDeltaProvider;
   const signerControlRegistry = SignerControlRegistry.getInstance();
 
   beforeEach(() => {
@@ -49,6 +52,7 @@ describe('SelfPaymentClient', () => {
         [
           'BTC',
           {
+            symbol: 'BTC',
             clnClient: {
               id: 'cln-1',
               type: NodeType.CLN,
@@ -57,9 +61,23 @@ describe('SelfPaymentClient', () => {
             lndClients: new Map(),
           },
         ],
+        [
+          'L-BTC',
+          {
+            symbol: 'L-BTC',
+            lndClients: new Map(),
+          },
+        ],
       ]),
     } as unknown as SwapNursery;
-    client = new SelfPaymentClient(Logger.disabledLogger, nursery);
+    timeoutDeltaProvider = {
+      getBlocksLeft: jest.fn().mockResolvedValue(10),
+    } as unknown as TimeoutDeltaProvider;
+    client = new SelfPaymentClient(
+      Logger.disabledLogger,
+      nursery,
+      timeoutDeltaProvider,
+    );
   });
 
   test('should use self node id', () => {
@@ -73,6 +91,8 @@ describe('SelfPaymentClient', () => {
     const mockSwap = {
       id: 'sub',
       type: SwapType.Submarine,
+      pair: 'BTC/BTC',
+      orderSide: OrderSide.BUY,
       preimageHash,
       invoice: 'invoice',
     };
@@ -146,6 +166,70 @@ describe('SelfPaymentClient', () => {
 
       expect(emitSpy).not.toHaveBeenCalled();
       expect(LightningNursery.cancelReverseInvoices).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      SwapUpdateEvent.SwapCreated,
+      SwapUpdateEvent.MinerFeePaid,
+      SwapUpdateEvent.InvoiceExpired,
+      SwapUpdateEvent.SwapExpired,
+    ])(
+      'should not start a new self payment from %s in recovery-only mode',
+      async (status) => {
+        const mockReverseSwap = {
+          id: 'rev',
+          preimageHash,
+          invoice: mockSwap.invoice,
+          status,
+        };
+
+        client['getReverseSwap'] = jest.fn().mockResolvedValue(mockReverseSwap);
+        const emitSpy = jest.spyOn(client, 'emit');
+
+        await expect(
+          client.handleSelfPayment(
+            mockSwap as any,
+            mockDecoded as any,
+            100,
+            [],
+            false,
+          ),
+        ).resolves.toEqual({
+          isSelf: false,
+          result: undefined,
+        });
+
+        expect(emitSpy).not.toHaveBeenCalled();
+        expect(LightningNursery.cancelReverseInvoices).not.toHaveBeenCalled();
+      },
+    );
+
+    test('should recover a progressed self payment in recovery-only mode', async () => {
+      const mockReverseSwap = {
+        id: 'rev',
+        preimage,
+        preimageHash,
+        invoice: mockSwap.invoice,
+        status: SwapUpdateEvent.InvoiceSettled,
+      };
+
+      client['getReverseSwap'] = jest.fn().mockResolvedValue(mockReverseSwap);
+
+      await expect(
+        client.handleSelfPayment(
+          mockSwap as any,
+          mockDecoded as any,
+          100,
+          [],
+          false,
+        ),
+      ).resolves.toEqual({
+        isSelf: true,
+        result: {
+          feeMsat: 0,
+          preimage: getHexBuffer(preimage),
+        },
+      });
     });
 
     test.each`
@@ -269,6 +353,247 @@ describe('SelfPaymentClient', () => {
       ).rejects.toThrow('invoice expired');
 
       expect(client['getReverseSwap']).toHaveBeenCalledTimes(1);
+    });
+
+    test.each([
+      ['L-BTC/BTC', 100, 100],
+      ['L-BTC/BTC', 100, 120],
+      // Only too late because of the cross chain buffer of 25%
+      ['L-BTC/BTC', 100, 90],
+      // Only too late because of the same currency buffer of 15 blocks
+      ['BTC/BTC', 100, 90],
+    ])(
+      'should throw error when CLTV limit (%s %d) does not outlive the reverse swap timeout (%d)',
+      async (pair, cltvLimit, reverseBlocksLeft) => {
+        const mockReverseSwap = {
+          preimageHash,
+          pair,
+          id: 'rev',
+          nodeId: 'cln-1',
+          orderSide: OrderSide.BUY,
+          timeoutBlockHeight: 21,
+          invoice: mockSwap.invoice,
+          status: SwapUpdateEvent.SwapCreated,
+        };
+
+        client['getReverseSwap'] = jest.fn().mockResolvedValue(mockReverseSwap);
+        timeoutDeltaProvider.getBlocksLeft = jest
+          .fn()
+          .mockResolvedValue(reverseBlocksLeft);
+        const emitSpy = jest.spyOn(client, 'emit');
+
+        await expect(
+          client.handleSelfPayment(
+            mockSwap as any,
+            mockDecoded as any,
+            cltvLimit,
+            [],
+          ),
+        ).rejects.toThrow('reverse swap timeout too late');
+
+        expect(timeoutDeltaProvider.getBlocksLeft).toHaveBeenCalledWith(
+          nursery.currencies.get(pair.split('/')[0]),
+          mockReverseSwap.timeoutBlockHeight,
+          'BTC',
+        );
+        expect(emitSpy).not.toHaveBeenCalled();
+        expect(LightningNursery.cancelReverseInvoices).not.toHaveBeenCalled();
+      },
+    );
+
+    test.each`
+      description                                 | reversePair    | reverseBlocksLeft | shouldThrow
+      ${'same currency, exactly at the boundary'} | ${'BTC/BTC'}   | ${85}             | ${true}
+      ${'same currency, one block clear'}         | ${'BTC/BTC'}   | ${84}             | ${false}
+      ${'cross chain, exactly at the boundary'}   | ${'L-BTC/BTC'} | ${80}             | ${true}
+      ${'cross chain, one block clear'}           | ${'L-BTC/BTC'} | ${79}             | ${false}
+    `(
+      'should apply the reverse swap timeout guard at the exact boundary: $description',
+      async ({ reversePair, reverseBlocksLeft, shouldThrow }) => {
+        const mockReverseSwap = {
+          preimageHash,
+          id: 'rev',
+          pair: reversePair,
+          nodeId: 'cln-1',
+          orderSide: OrderSide.BUY,
+          timeoutBlockHeight: 21,
+          invoice: mockSwap.invoice,
+          status: SwapUpdateEvent.SwapCreated,
+        };
+
+        client['getReverseSwap'] = jest.fn().mockResolvedValue(mockReverseSwap);
+        timeoutDeltaProvider.getBlocksLeft = jest
+          .fn()
+          .mockResolvedValue(reverseBlocksLeft);
+        const emitSpy = jest.spyOn(client, 'emit');
+
+        const call = client.handleSelfPayment(
+          mockSwap as any,
+          mockDecoded as any,
+          100,
+          [],
+        );
+
+        if (shouldThrow) {
+          await expect(call).rejects.toThrow('reverse swap timeout too late');
+          expect(emitSpy).not.toHaveBeenCalled();
+        } else {
+          await expect(call).resolves.toEqual({
+            isSelf: true,
+            result: undefined,
+          });
+          expect(emitSpy).toHaveBeenCalledWith(
+            'htlc.accepted',
+            mockReverseSwap.invoice,
+          );
+        }
+      },
+    );
+
+    test.each`
+      description                           | reverseBlocksLeft | shouldThrow
+      ${'rejects at the buffered boundary'} | ${85}             | ${true}
+      ${'allows one block clear'}           | ${84}             | ${false}
+    `(
+      'should denominate the reverse timeout in the submarine lightning currency: $description',
+      async ({ reverseBlocksLeft, shouldThrow }) => {
+        const crossChainSwap = {
+          ...mockSwap,
+          pair: 'L-BTC/BTC',
+          orderSide: OrderSide.SELL,
+        };
+
+        const mockReverseSwap = {
+          preimageHash,
+          id: 'rev',
+          pair: 'BTC/BTC',
+          nodeId: 'cln-1',
+          orderSide: OrderSide.BUY,
+          timeoutBlockHeight: 21,
+          invoice: mockSwap.invoice,
+          status: SwapUpdateEvent.SwapCreated,
+        };
+
+        client['getReverseSwap'] = jest.fn().mockResolvedValue(mockReverseSwap);
+        timeoutDeltaProvider.getBlocksLeft = jest
+          .fn()
+          .mockResolvedValue(reverseBlocksLeft);
+
+        const call = client.handleSelfPayment(
+          crossChainSwap as any,
+          mockDecoded as any,
+          100,
+          [],
+        );
+
+        if (shouldThrow) {
+          await expect(call).rejects.toThrow('reverse swap timeout too late');
+        } else {
+          await expect(call).resolves.toEqual({
+            isSelf: true,
+            result: undefined,
+          });
+        }
+
+        expect(timeoutDeltaProvider.getBlocksLeft).toHaveBeenCalledWith(
+          nursery.currencies.get('BTC'),
+          mockReverseSwap.timeoutBlockHeight,
+          'BTC',
+        );
+      },
+    );
+
+    describe('with a real TimeoutDeltaProvider', () => {
+      const currentBlock = 100;
+      const reverseOnchainDelta = 144;
+
+      const buildClient = () => {
+        const currencies = new Map([
+          [
+            'BTC',
+            {
+              symbol: 'BTC',
+              type: CurrencyType.BitcoinLike,
+              clnClient: {
+                id: 'cln-1',
+                type: NodeType.CLN,
+                isConnected: jest.fn().mockReturnValue(true),
+              },
+              lndClients: new Map(),
+              chainClient: {
+                getBlockchainInfo: jest
+                  .fn()
+                  .mockResolvedValue({ blocks: currentBlock }),
+              },
+            },
+          ],
+        ]);
+
+        return new SelfPaymentClient(
+          Logger.disabledLogger,
+          {
+            on: jest.fn(),
+            removeListener: jest.fn(),
+            currencies,
+          } as unknown as SwapNursery,
+          new TimeoutDeltaProvider(
+            Logger.disabledLogger,
+            { configpath: '', pairs: [], currencies: [] } as any,
+            {} as any,
+            currencies as any,
+            {} as any,
+            { cltvDelta: 20 },
+          ),
+        );
+      };
+
+      test.each`
+        description                | cltvLimit | shouldThrow
+        ${'at the real threshold'} | ${159}    | ${true}
+        ${'one block above it'}    | ${160}    | ${false}
+      `(
+        'should guard against the reverse swap onchain timeout $description',
+        async ({ cltvLimit, shouldThrow }) => {
+          const realClient = buildClient();
+
+          const mockReverseSwap = {
+            preimageHash,
+            id: 'rev',
+            pair: 'BTC/BTC',
+            nodeId: 'cln-1',
+            orderSide: OrderSide.BUY,
+            timeoutBlockHeight: currentBlock + reverseOnchainDelta,
+            invoice: mockSwap.invoice,
+            status: SwapUpdateEvent.SwapCreated,
+          };
+
+          realClient['getReverseSwap'] = jest
+            .fn()
+            .mockResolvedValue(mockReverseSwap);
+
+          const call = realClient.handleSelfPayment(
+            mockSwap as any,
+            mockDecoded as any,
+            cltvLimit,
+            [],
+          );
+
+          if (shouldThrow) {
+            await expect(call).rejects.toThrow('reverse swap timeout too late');
+          } else {
+            await expect(call).resolves.toEqual({
+              isSelf: true,
+              result: undefined,
+            });
+          }
+        },
+      );
+
+      test('should guard at the CLTV the hold invoice of the reverse swap advertises', () => {
+        expect(
+          TimeoutDeltaProvider.addBuffer(reverseOnchainDelta, true),
+        ).toEqual(159);
+      });
     });
 
     test('should emit htlc.accepted when reverse swap status is SwapCreated', async () => {

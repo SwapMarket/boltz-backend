@@ -1,3 +1,4 @@
+import { Op } from 'sequelize';
 import type { LightningPaymentType } from '../models/LightningPayment';
 import LightningPayment, {
   LightningPaymentStatus,
@@ -74,6 +75,24 @@ class LightningPaymentRepository {
     preimageHash: string,
     nodeId: string,
   ) => LightningPayment.findOne({ where: { preimageHash, nodeId } });
+
+  public static findByPreimageHashesAndStatus = (
+    preimageHashes: string[],
+    status: LightningPaymentStatus,
+  ) => {
+    if (preimageHashes.length === 0) {
+      return Promise.resolve([] as LightningPayment[]);
+    }
+
+    return LightningPayment.findAll({
+      where: {
+        status,
+        preimageHash: {
+          [Op.in]: preimageHashes,
+        },
+      },
+    });
+  };
 
   public static findByStatus = (status: LightningPaymentStatus) =>
     LightningPayment.findAll({

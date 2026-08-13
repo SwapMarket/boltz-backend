@@ -5,8 +5,8 @@ use crate::chain::types::{
     SignRawTransactionResponse, SmartFeeEstimate, Type, UnspentOutput, ZmqNotification,
 };
 use crate::chain::utils::{Block, Outpoint, Transaction};
-use crate::chain::zmq_client::{ZMQ_BLOCK_CHANNEL_SIZE, ZMQ_TX_CHANNEL_SIZE, ZmqClient};
-use crate::chain::{BaseClient, Client, Config, Transactions};
+use crate::chain::zmq_client::{ZMQ_BLOCK_CHANNEL_SIZE, ZmqClient};
+use crate::chain::{BaseClient, Client, Config, TRANSACTION_CHANNEL_SIZE, Transactions};
 use crate::db::helpers::chain_tip::ChainTipHelper;
 use crate::wallet::Network;
 use anyhow::anyhow;
@@ -120,7 +120,7 @@ impl ChainClient {
             client: RpcClient::new(symbol.clone(), config.clone())?,
             mempool_space,
             zmq_client: ZmqClient::new(client_type, network, config),
-            tx_sender: channel(ZMQ_TX_CHANNEL_SIZE).0,
+            tx_sender: channel(TRANSACTION_CHANNEL_SIZE).0,
             block_sender: channel(ZMQ_BLOCK_CHANNEL_SIZE).0,
         };
 

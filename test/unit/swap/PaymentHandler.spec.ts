@@ -1,5 +1,6 @@
+import { randomBytes } from 'crypto';
 import Logger from '../../../lib/Logger';
-import { getHexBuffer } from '../../../lib/Utils';
+import { getHexBuffer, getHexString } from '../../../lib/Utils';
 import { SwapType, SwapUpdateEvent } from '../../../lib/consts/Enums';
 import { LightningPaymentStatus } from '../../../lib/db/models/LightningPayment';
 import type Swap from '../../../lib/db/models/Swap';
@@ -7,6 +8,8 @@ import SendApprovalHoldRepository from '../../../lib/db/repositories/SendApprova
 import LightningErrors from '../../../lib/lightning/Errors';
 import type { LightningClient } from '../../../lib/lightning/LightningClient';
 import LndClient from '../../../lib/lightning/LndClient';
+import NoExistingPaymentActionError from '../../../lib/lightning/NoExistingPaymentActionError';
+import ClnClient from '../../../lib/lightning/cln/ClnClient';
 import { Signer } from '../../../lib/proto/boltzrpc';
 import { Payment_PaymentStatus } from '../../../lib/proto/lnd/rpc';
 import SignerControlRegistry from '../../../lib/service/SignerControlRegistry';
@@ -60,6 +63,7 @@ const MockedTimeoutDeltaProvider = <jest.Mock<TimeoutDeltaProvider>>(
 );
 
 let sendPaymentError: any;
+let sendPaymentResponse: any;
 let trackPaymentResponse: any;
 
 jest.mock('../../../lib/lightning/LndClient', () => {
@@ -76,6 +80,8 @@ jest.mock('../../../lib/lightning/LndClient', () => {
         if (sendPaymentError !== undefined) {
           throw sendPaymentError;
         }
+
+        return sendPaymentResponse;
       }),
     });
   });
@@ -148,6 +154,17 @@ describe('PaymentHandler', () => {
             ),
           };
         }),
+      getPaymentActions: jest.fn().mockImplementation(async () => ({
+        paymentHash: swap.preimageHash,
+        payments: relevantPayments,
+        existingRelevantAction: relevantPayments.find((p: any) =>
+          [
+            LightningPaymentStatus.Pending,
+            LightningPaymentStatus.Success,
+            LightningPaymentStatus.PermanentFailure,
+          ].includes(p.status),
+        ),
+      })),
     } as any,
     { emit: mockedEmit } as any,
     sendApprovalHook as any,
@@ -165,6 +182,7 @@ describe('PaymentHandler', () => {
     jest.clearAllMocks();
     cltvLimit = 100;
     sendPaymentError = undefined;
+    sendPaymentResponse = undefined;
     trackPaymentResponse = undefined;
     (signerControlRegistry as any)['disabledSigners'].clear();
     (signerControlRegistry as any)['repository'] = undefined;
@@ -199,6 +217,83 @@ describe('PaymentHandler', () => {
     );
   });
 
+  describe('CLTV limits that are too small', () => {
+    const clnClient = Object.assign(Object.create(ClnClient.prototype), {
+      id: 'cln-1',
+      symbol: 'BTC',
+    });
+
+    beforeEach(() => {
+      cltvLimit = 1;
+    });
+
+    test.each`
+      status
+      ${LightningPaymentStatus.TemporaryFailure}
+      ${LightningPaymentStatus.PermanentFailure}
+      ${undefined}
+    `(
+      'should not attempt a payment for an existing $status one',
+      async ({ status }) => {
+        relevantPayments = status === undefined ? [] : [{ status } as any];
+        trackPaymentResponse = { status: Payment_PaymentStatus.IN_FLIGHT };
+
+        await expect(handler.payInvoice(swap)).resolves.toBeUndefined();
+
+        expect(
+          handler['pendingPaymentTracker'].sendPayment,
+        ).not.toHaveBeenCalled();
+      },
+    );
+
+    test('should attempt a payment when one succeeded already', async () => {
+      relevantPayments = [{ status: LightningPaymentStatus.Success } as any];
+
+      await expect(handler.payInvoice(swap)).resolves.toBeUndefined();
+
+      expect(
+        handler['pendingPaymentTracker'].sendPayment,
+      ).toHaveBeenCalledTimes(1);
+      expect(btcLndClient.trackPayment).not.toHaveBeenCalled();
+    });
+
+    test('should settle the swap with the preimage of a payment that succeeded already', async () => {
+      const preimage = randomBytes(32);
+      relevantPayments = [{ status: LightningPaymentStatus.Success } as any];
+      sendPaymentResponse = { feeMsat: 21, preimage };
+
+      await expect(handler.payInvoice(swap)).resolves.toEqual(preimage);
+
+      expect(swap.update).toHaveBeenCalledWith({
+        preimage: getHexString(preimage),
+        routingFee: 21,
+        failureReason: null,
+        status: SwapUpdateEvent.InvoicePaid,
+      });
+      expect(mockedEmit).toHaveBeenCalledWith('invoice.paid', swap);
+    });
+
+    test('should settle a CLN swap with the preimage of a payment that succeeded already', async () => {
+      const preimage = randomBytes(32);
+      (nodeSwitch.getSwapNode as jest.Mock).mockResolvedValueOnce(clnClient);
+      relevantPayments = [{ status: LightningPaymentStatus.Success } as any];
+      sendPaymentResponse = { feeMsat: 21, preimage };
+
+      await expect(handler.payInvoice(swap)).resolves.toEqual(preimage);
+
+      expect(mockedEmit).toHaveBeenCalledWith('invoice.paid', swap);
+    });
+
+    test('should not settle a CLN swap when no payment succeeded', async () => {
+      (nodeSwitch.getSwapNode as jest.Mock).mockResolvedValueOnce(clnClient);
+
+      await expect(handler.payInvoice(swap)).resolves.toBeUndefined();
+
+      expect(mockedEmit).not.toHaveBeenCalled();
+      expect(swap.update).not.toHaveBeenCalled();
+    });
+  });
+
   test('should fail fast for new payments when invoice signer is disabled', async () => {
     await signerControlRegistry.disableSigners([
       Signer.SIGNER_SUBMARINE_INVOICE_PAYMENT,
@@ -214,6 +309,7 @@ describe('PaymentHandler', () => {
       0,
       cltvLimit,
       [],
+      true,
     );
     expect(btcLndClient.sendPayment).not.toHaveBeenCalled();
     expect(swap.update).toHaveBeenCalledTimes(1);
@@ -364,6 +460,7 @@ describe('PaymentHandler', () => {
       0,
       cltvLimit,
       relevantPayments,
+      true,
     );
     expect(btcLndClient.sendPayment).toHaveBeenCalledTimes(1);
     expect(swap.update).not.toHaveBeenCalled();
@@ -385,6 +482,56 @@ describe('PaymentHandler', () => {
       failureReason: 'invoice could not be paid',
       status: SwapUpdateEvent.InvoiceFailedToPay,
     });
+  });
+
+  test.each([
+    ['no payment rows', []],
+    [
+      'only a temporary failure',
+      [{ status: LightningPaymentStatus.TemporaryFailure }],
+    ],
+  ])('should reject recovery-only mode with %s', async (_name, payments) => {
+    relevantPayments = payments as any[];
+
+    await expect(handler.payInvoice(swap, false)).rejects.toBeInstanceOf(
+      NoExistingPaymentActionError,
+    );
+
+    expect(handler['selfPaymentClient'].handleSelfPayment).toHaveBeenCalledWith(
+      swap,
+      0,
+      cltvLimit,
+      relevantPayments,
+      false,
+    );
+    expect(nodeSwitch.invoicePaymentHook).not.toHaveBeenCalled();
+    expect(sendApprovalHook.hook).not.toHaveBeenCalled();
+    expect(handler['pendingPaymentTracker'].sendPayment).not.toHaveBeenCalled();
+    expect(btcLndClient.sendPayment).not.toHaveBeenCalled();
+    expect(swap.update).not.toHaveBeenCalled();
+  });
+
+  test('should recover an in-flight payment in recovery-only mode', async () => {
+    relevantPayments = [
+      {
+        status: LightningPaymentStatus.Pending,
+        nodeId: btcLndClient.id,
+      } as any,
+    ];
+
+    await expect(handler.payInvoice(swap, false)).resolves.toBeUndefined();
+
+    expect(sendApprovalHook.hook).not.toHaveBeenCalled();
+    expect(handler['pendingPaymentTracker'].sendPayment).toHaveBeenCalledWith(
+      swap,
+      btcLndClient,
+      swap.preimageHash,
+      relevantPayments,
+      cltvLimit,
+      undefined,
+      false,
+    );
+    expect(swap.update).not.toHaveBeenCalled();
   });
 
   test.each`
@@ -581,10 +728,41 @@ describe('PaymentHandler', () => {
       ).toHaveBeenCalledTimes(1);
       expect(
         handler['selfPaymentClient'].handleSelfPayment,
-      ).toHaveBeenCalledWith(swap, 0, cltvLimit, []);
+      ).toHaveBeenCalledWith(swap, 0, cltvLimit, [], true);
       expect(settleInvoiceSpy).toHaveBeenCalledTimes(1);
       expect(settleInvoiceSpy).toHaveBeenCalledWith(swap, mockPaymentResponse);
       expect(btcLndClient.sendPayment).not.toHaveBeenCalled();
+    });
+
+    test('should recover a progressed self payment in recovery-only mode', async () => {
+      const mockPaymentResponse = {
+        feeMsat: 0,
+        preimage: getHexBuffer('abcd1234'),
+      };
+
+      (handler['selfPaymentClient'].handleSelfPayment as jest.Mock) = jest
+        .fn()
+        .mockResolvedValue({
+          isSelf: true,
+          result: mockPaymentResponse,
+        });
+
+      const settleInvoiceSpy = jest
+        .spyOn(handler as any, 'settleInvoice')
+        .mockResolvedValue(mockPaymentResponse.preimage);
+
+      await expect(handler.payInvoice(swap, false)).resolves.toEqual(
+        mockPaymentResponse.preimage,
+      );
+
+      expect(
+        handler['selfPaymentClient'].handleSelfPayment,
+      ).toHaveBeenCalledWith(swap, 0, cltvLimit, [], false);
+      expect(nodeSwitch.invoicePaymentHook).not.toHaveBeenCalled();
+      expect(settleInvoiceSpy).toHaveBeenCalledWith(swap, mockPaymentResponse);
+      expect(
+        handler['pendingPaymentTracker'].sendPayment,
+      ).not.toHaveBeenCalled();
     });
 
     test('should handle self payment when isSelf is true but result is undefined', async () => {

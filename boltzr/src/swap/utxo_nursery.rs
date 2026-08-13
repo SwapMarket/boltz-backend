@@ -1,6 +1,6 @@
 use crate::{
     chain::{
-        Client, Transactions,
+        Client, TRANSACTION_CHANNEL_SIZE, Transactions,
         utils::{Block, Transaction},
     },
     currencies::Currencies,
@@ -14,8 +14,6 @@ use std::sync::Arc;
 use tokio::sync::broadcast::{self, error::RecvError};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error};
-
-const CHANNEL_CAPACITY: usize = 1024;
 
 #[derive(Debug, Clone)]
 pub enum TxStatus {
@@ -53,7 +51,7 @@ impl UtxoNursery {
             currencies,
             tx_checker,
             chain_tip_helper,
-            relevant_txs: broadcast::channel(CHANNEL_CAPACITY).0,
+            relevant_txs: broadcast::channel(TRANSACTION_CHANNEL_SIZE).0,
         }
     }
 

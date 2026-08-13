@@ -3,7 +3,7 @@ import express from 'express';
 import { Gauge, Registry, collectDefaultMetrics } from 'prom-client';
 import InstrumentedLock from './InstrumentedLock';
 import type Logger from './Logger';
-import { getPairId } from './Utils';
+import { formatError, getPairId } from './Utils';
 import type Api from './api/Api';
 import { SwapType as ST, SwapVersion } from './consts/Enums';
 import type { PairConfig } from './consts/Types';
@@ -14,6 +14,7 @@ import type {
   SwapTypes,
 } from './rates/providers/RateProviderTaproot';
 import type Service from './service/Service';
+import { findPaidUnclaimedSwaps } from './swap/PaidUnclaimedSwaps';
 
 type PrometheusConfig = {
   host?: string;
@@ -101,6 +102,7 @@ class Prometheus {
     // Needed because "this" in the collector refers to the function
     const api = this.api;
     const service = this.service;
+    const logger = this.logger;
 
     const iterateAllPairs = async <T = SwapTypes>(
       cb: (pair: T, pairId: string, type: SwapType, referral: string) => void,
@@ -427,6 +429,22 @@ class Prometheus {
           this.reset();
           for (const entry of InstrumentedLock.snapshot()) {
             this.set({ name: entry.name, key: entry.key }, entry.rejections);
+          }
+        },
+      }),
+    );
+
+    this.swapRegistry!.registerMetric(
+      new Gauge({
+        name: `${Prometheus.metricPrefix}swap_paid_unclaimed_count`,
+        help: 'number of Swaps with a paid invoice that have not been claimed',
+        collect: async function () {
+          try {
+            this.set({}, (await findPaidUnclaimedSwaps(0)).length);
+          } catch (e) {
+            logger.warn(
+              `Could not collect unclaimed Swaps metric: ${formatError(e)}`,
+            );
           }
         },
       }),

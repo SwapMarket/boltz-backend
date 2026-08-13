@@ -210,7 +210,7 @@ class CommitmentRouter extends RouterBase {
       { name: 'maxOverpaymentPercentage', type: 'number', optional: true },
     ]);
 
-    this.validateTransactionHash(transactionHash);
+    const canonicalHash = this.validateTransactionHash(transactionHash);
     this.validateLogIndex(logIndex);
 
     if (
@@ -227,7 +227,7 @@ class CommitmentRouter extends RouterBase {
       currency,
       swapId,
       signature,
-      transactionHash,
+      canonicalHash,
       logIndex,
       maxOverpaymentPercentage,
     );
@@ -245,7 +245,7 @@ class CommitmentRouter extends RouterBase {
         { name: 'refundAddressSignature', type: 'string' },
       ]);
 
-    this.validateTransactionHash(transactionHash);
+    const canonicalHash = this.validateTransactionHash(transactionHash);
     this.validateLogIndex(logIndex);
 
     this.getManager(currency);
@@ -255,7 +255,7 @@ class CommitmentRouter extends RouterBase {
         signature:
           await this.service.swapManager.eipSigner.signCommitmentRefund(
             currency,
-            transactionHash,
+            canonicalHash,
             refundAddressSignature,
             logIndex,
           ),
@@ -285,10 +285,12 @@ class CommitmentRouter extends RouterBase {
     }
   };
 
-  private validateTransactionHash = (transactionHash: string) => {
+  private validateTransactionHash = (transactionHash: string): string => {
     if (!/^0x[0-9a-fA-F]{64}$/.test(transactionHash)) {
       throw Errors.INVALID_PARAMETER('transactionHash');
     }
+
+    return transactionHash.toLowerCase();
   };
 }
 

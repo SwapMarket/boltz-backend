@@ -607,4 +607,74 @@ describe('SwapRepository', () => {
       expect(affectedCount).toEqual(0);
     });
   });
+
+  describe('destroyPristine', () => {
+    test('should destroy pristine swaps', async () => {
+      const swap = await Swap.create(createSubmarineSwapData());
+
+      await expect(SwapRepository.destroyPristine(swap.id)).resolves.toEqual(
+        true,
+      );
+      await expect(SwapRepository.getSwap({ id: swap.id })).resolves.toBeNull();
+    });
+
+    test.each`
+      name                    | write
+      ${'set invoice'}        | ${(swap: Swap) => SwapRepository.setInvoice(swap, 'lnbcrt1', 100_000, 100_500, 100, false)}
+      ${'lockup transaction'} | ${(swap: Swap) => SwapRepository.setLockupTransaction(swap, 'lockup-a', 100_000, SwapUpdateEvent.TransactionMempool, 0)}
+      ${'confirmed lockup'}   | ${(swap: Swap) => SwapRepository.setLockupTransaction(swap, 'lockup-a', 100_000, SwapUpdateEvent.TransactionConfirmed, 0)}
+      ${'refund signature'}   | ${(swap: Swap) => SwapRepository.setRefundSignatureCreated(swap.id)}
+      ${'status advance'}     | ${(swap: Swap) => SwapRepository.setSwapStatus(swap, SwapUpdateEvent.InvoicePending)}
+      ${'onchain amount'}     | ${(swap: Swap) => swap.update({ onchainAmount: 100_000 })}
+      ${'bare invoice'}       | ${(swap: Swap) => swap.update({ invoice: 'lnbcrt1' })}
+      ${'bare lockup'}        | ${(swap: Swap) => swap.update({ lockupTransactionId: 'lockup-a' })}
+    `('should not destroy swaps after a $name', async ({ write }) => {
+      const swap = await Swap.create(createSubmarineSwapData());
+      await write(swap);
+
+      await expect(SwapRepository.destroyPristine(swap.id)).resolves.toEqual(
+        false,
+      );
+      await expect(
+        SwapRepository.getSwap({ id: swap.id }),
+      ).resolves.not.toBeNull();
+    });
+
+    test('should reject a lockup of a destroyed swap', async () => {
+      const swap = await Swap.create(createSubmarineSwapData());
+
+      await expect(SwapRepository.destroyPristine(swap.id)).resolves.toEqual(
+        true,
+      );
+
+      const result = await SwapRepository.setLockupTransaction(
+        swap,
+        'lockup-a',
+        100_000,
+        SwapUpdateEvent.TransactionConfirmed,
+        0,
+      );
+
+      expect(result.outcome).toEqual(LockupWriteOutcome.Rejected);
+      await expect(SwapRepository.getSwap({ id: swap.id })).resolves.toBeNull();
+    });
+
+    test('should not destroy other swaps', async () => {
+      const swap = await Swap.create(createSubmarineSwapData());
+      const other = await Swap.create(createSubmarineSwapData());
+
+      await expect(SwapRepository.destroyPristine(swap.id)).resolves.toEqual(
+        true,
+      );
+      await expect(
+        SwapRepository.getSwap({ id: other.id }),
+      ).resolves.not.toBeNull();
+    });
+
+    test('should handle non-existent swap ID gracefully', async () => {
+      await expect(
+        SwapRepository.destroyPristine('non-existent-swap-id'),
+      ).resolves.toEqual(false);
+    });
+  });
 });
