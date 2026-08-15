@@ -133,6 +133,9 @@ type ArbitrumConfig = EthereumConfig & {
 type ApiConfig = {
   host: string;
   port: number;
+  // When set, all "/v2" requests must carry an "x-api-signature" header with
+  // the HMAC-SHA256 of the raw request body keyed by this secret
+  authSecret?: string;
 };
 
 type GrpcJwtConfig = {

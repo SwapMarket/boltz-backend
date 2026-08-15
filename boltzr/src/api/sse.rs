@@ -344,6 +344,7 @@ mod test {
             crate::api::Config {
                 port,
                 host: "127.0.0.1".to_string(),
+                auth_secret: None,
             },
             cancel.clone(),
             Arc::new(crate::swap::manager::test::MockManager::new()),
@@ -406,6 +407,7 @@ mod test {
             crate::api::Config {
                 port,
                 host: "127.0.0.1".to_string(),
+                auth_secret: None,
             },
             cancel.clone(),
             Arc::new(crate::swap::manager::test::MockManager::new()),

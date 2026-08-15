@@ -115,7 +115,7 @@ mod test {
     fn setup_router(with_pair_stats: bool) -> Router {
         let (status_tx, _) = tokio::sync::broadcast::channel::<(Option<u64>, Vec<SwapStatus>)>(1);
 
-        Server::<Fetcher, MockManager>::add_routes(Router::new()).layer(Extension(Arc::new(
+        Server::<Fetcher, MockManager>::add_routes(Router::new(), None).layer(Extension(Arc::new(
             ServerState {
                 manager: Arc::new(MockManager::new()),
                 service: Arc::new(Service::new_mocked_prometheus(with_pair_stats)),

@@ -1,3 +1,4 @@
+use crate::api::auth::auth_middleware;
 use crate::api::errors::{error_middleware, logging_middleware};
 use crate::api::rescue::{swap_rescue, swap_restore, swap_restore_index};
 use crate::api::sse::sse_handler;
@@ -18,6 +19,7 @@ use ws::types::SwapStatus;
 use crate::metrics::server::MetricsLayer;
 
 mod asset_rescue;
+mod auth;
 mod bolt12;
 mod errors;
 mod headers;
@@ -35,6 +37,11 @@ pub use bolt12::MagicRoutingHint;
 pub struct Config {
     pub host: String,
     pub port: u16,
+
+    // When set, requests must carry an "x-api-signature" header with the
+    // HMAC-SHA256 of the raw request body keyed by this secret
+    #[serde(rename = "authSecret")]
+    pub auth_secret: Option<String>,
 }
 
 pub struct Server<S, M> {
@@ -82,7 +89,7 @@ where
     #[cfg(feature = "metrics")]
     pub async fn start(&self, metrics_layer: Option<MetricsLayer>) -> Result<(), Box<dyn Error>> {
         let mut router = Router::new();
-        router = Self::add_routes(router);
+        router = Self::add_routes(router, self.config.auth_secret.clone().map(Arc::new));
 
         if let Some(metrics_layer) = metrics_layer {
             router = router.layer(metrics_layer);
@@ -93,7 +100,11 @@ where
 
     #[cfg(not(feature = "metrics"))]
     pub async fn start(&self) -> Result<(), Box<dyn Error>> {
-        self.listen(Self::add_routes(Router::new())).await
+        self.listen(Self::add_routes(
+            Router::new(),
+            self.config.auth_secret.clone().map(Arc::new),
+        ))
+        .await
     }
 
     async fn listen(&self, router: Router) -> Result<(), Box<dyn Error>> {
@@ -124,7 +135,7 @@ where
         }
     }
 
-    fn add_routes(router: Router) -> Router {
+    fn add_routes(router: Router, auth_secret: Option<Arc<String>>) -> Router {
         router
             // Server-Sent events
             .route("/streamswapstatus", get(sse_handler::<S, M>))
@@ -197,6 +208,10 @@ where
             // Middlewares
             .layer(axum::middleware::from_fn(error_middleware))
             .layer(axum::middleware::from_fn(logging_middleware))
+            .layer(axum::middleware::from_fn(move |req, next| {
+                let auth_secret = auth_secret.clone();
+                async move { auth_middleware(auth_secret, req, next).await }
+            }))
     }
 }
 
@@ -257,6 +272,7 @@ pub mod test {
             Config {
                 port,
                 host: "127.0.0.1".to_string(),
+                auth_secret: None,
             },
             cancel.clone(),
             Arc::new(MockManager::new()),

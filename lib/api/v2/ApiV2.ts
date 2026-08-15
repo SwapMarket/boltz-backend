@@ -2,6 +2,7 @@ import type { Application } from 'express';
 import type Logger from '../../Logger';
 import type Service from '../../service/Service';
 import type SwapInfos from '../SwapInfos';
+import Auth from './Auth';
 import { apiPrefix } from './Consts';
 import ChainRouter from './routers/ChainRouter';
 import CommitmentRouter from './routers/CommitmentRouter';
@@ -18,6 +19,7 @@ class ApiV2 {
     private readonly logger: Logger,
     service: Service,
     swapInfos: SwapInfos,
+    private readonly authSecret?: string,
   ) {
     this.routers = [
       new InfoRouter(this.logger, service),
@@ -30,6 +32,8 @@ class ApiV2 {
   }
 
   public registerRoutes = (app: Application) => {
+    app.use(apiPrefix, Auth.middleware(this.logger, this.authSecret));
+
     this.routers.forEach((router) =>
       app.use(`${apiPrefix}/${router.path}`, router.getRouter()),
     );

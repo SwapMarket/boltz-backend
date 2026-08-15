@@ -373,6 +373,7 @@ macaroonpath = "/tmp/fulmine/admin.macaroon"
                 api: crate::api::Config {
                     host: "127.0.0.1".to_string(),
                     port: 9005,
+                    auth_secret: None,
                 },
                 ws: crate::ws::Config {
                     host: "0.0.0.0".to_string(),

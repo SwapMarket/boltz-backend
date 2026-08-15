@@ -74,7 +74,12 @@ class Api {
     this.swapInfos = new SwapInfos(this.logger, service, redis);
     this.controller = new Controller(logger, service, this.swapInfos);
 
-    new ApiV2(this.logger, service, this.swapInfos).registerRoutes(this.app);
+    new ApiV2(
+      this.logger,
+      service,
+      this.swapInfos,
+      this.config.authSecret,
+    ).registerRoutes(this.app);
     this.registerRoutes(this.controller);
 
     this.app.use(

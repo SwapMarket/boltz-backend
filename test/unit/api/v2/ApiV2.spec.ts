@@ -87,7 +87,8 @@ describe('ApiV2', () => {
     expect(mockGetChainRouter).toHaveBeenCalledTimes(1);
     expect(mockGetCommitmentRouter).toHaveBeenCalledTimes(1);
 
-    expect(app.use).toHaveBeenCalledTimes(6);
+    expect(app.use).toHaveBeenCalledTimes(7);
+    expect(app.use).toHaveBeenCalledWith(apiPrefix, expect.any(Function));
     expect(app.use).toHaveBeenCalledWith(`${apiPrefix}/`, mockGetInfoRouter());
     expect(app.use).toHaveBeenCalledWith(
       `${apiPrefix}/swap`,
