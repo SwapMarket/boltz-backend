@@ -42,7 +42,7 @@ jobs:
 
       - name: Build and push
         run: |
-          ./docker/build.py buildx --platform linux/amd64 --no-latest \
+          ./docker/build.py buildx --platform linux/amd64 --no-latest --local \
             --organisation ${{ env.ORGANISATION }} \
             --branch ${{ env.BRANCH }} --tag amd64 boltz
 
@@ -67,7 +67,7 @@ jobs:
 
       - name: Build and push
         run: |
-          ./docker/build.py buildx --platform linux/arm64 --no-latest \
+          ./docker/build.py buildx --platform linux/arm64 --no-latest --local \
             --organisation ${{ env.ORGANISATION }} \
             --branch ${{ env.BRANCH }} --tag arm64 boltz
 
