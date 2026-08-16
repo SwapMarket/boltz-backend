@@ -2,67 +2,88 @@ name: Docker
 
 on:
   workflow_dispatch:
-  push:
+  workflow_run:
+    workflows: ['CI']
+    types: [completed]
     branches: ['master']
 
 concurrency:
   group: docker-publish
   cancel-in-progress: false
 
+permissions:
+  contents: read
+  packages: write
+
+env:
+  ORGANISATION: ghcr.io/swapmarket
+  REF: ${{ github.event.workflow_run.head_sha || github.sha }}
+  BRANCH: ${{ github.event.workflow_run.head_branch || github.ref_name }}
+
 jobs:
   build-amd64:
     name: Build AMD64
     runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ env.REF }}
           submodules: 'true'
 
-      - name: Login to Docker Hub
+      - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
         run: |
           ./docker/build.py buildx --platform linux/amd64 --no-latest \
-            --branch ${{ github.ref_name }} --tag amd64 boltz
+            --organisation ${{ env.ORGANISATION }} \
+            --branch ${{ env.BRANCH }} --tag amd64 boltz
 
   build-arm64:
     name: Build ARM64
     runs-on: ubuntu-24.04-arm
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ env.REF }}
           submodules: 'true'
 
-      - name: Login to Docker Hub
+      - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
         run: |
           ./docker/build.py buildx --platform linux/arm64 --no-latest \
-            --branch ${{ github.ref_name }} --tag arm64 boltz
+            --organisation ${{ env.ORGANISATION }} \
+            --branch ${{ env.BRANCH }} --tag arm64 boltz
 
   create-manifest:
     name: Create Manifest
     runs-on: ubuntu-latest
     needs: [build-amd64, build-arm64]
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     steps:
-      - name: Login to Docker Hub
+      - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create and push manifest
         run: |
-          TAG=$(echo "${{ github.ref_name == 'master' && 'latest' || github.ref_name }}" | tr '/' '-')
+          TAG=$(echo "${{ env.BRANCH == 'master' && 'latest' || env.BRANCH }}" | tr '/' '-')
           docker buildx imagetools create \
-            -t boltz/boltz:${TAG} \
-            boltz/boltz:amd64 \
-            boltz/boltz:arm64
+            -t ${{ env.ORGANISATION }}/boltz:${TAG} \
+            ${{ env.ORGANISATION }}/boltz:amd64 \
+            ${{ env.ORGANISATION }}/boltz:arm64
