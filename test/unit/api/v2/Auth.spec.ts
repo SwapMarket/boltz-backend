@@ -15,6 +15,10 @@ const sign = (
     .digest('hex');
 
 describe('Auth', () => {
+  beforeEach(() => {
+    Auth['seenSignatures'].clear();
+  });
+
   test('should call next without checking when no secret is configured', () => {
     const next = jest.fn();
     const req = { get: jest.fn() } as any;
@@ -188,5 +192,82 @@ describe('Auth', () => {
 
     expect(next).not.toHaveBeenCalled();
     expect(status).toHaveBeenCalledWith(401);
+  });
+
+  test('should reject a replayed signature within the tolerance window', () => {
+    const secret = 'secret';
+    const ts = getUnixTime();
+    const method = 'POST';
+    const path = '/v2/swap/submarine';
+    const body = 'some raw body';
+    const signature = sign(secret, ts, method, path, body);
+
+    const makeReq = () =>
+      ({
+        get: jest.fn().mockImplementation((name: string) => {
+          if (name === Auth.timestampHeader) return ts.toString();
+          if (name === Auth.signatureHeader) return signature;
+          return undefined;
+        }),
+        rawBody: body,
+        method,
+        originalUrl: path,
+      }) as any;
+
+    const firstNext = jest.fn();
+    Auth.middleware(Logger.disabledLogger, secret)(
+      makeReq(),
+      {} as any,
+      firstNext,
+    );
+    expect(firstNext).toHaveBeenCalledTimes(1);
+
+    const secondNext = jest.fn();
+    const status = jest.fn().mockReturnThis();
+    const json = jest.fn();
+    Auth.middleware(Logger.disabledLogger, secret)(
+      makeReq(),
+      { set: jest.fn(), status, json } as any,
+      secondNext,
+    );
+
+    expect(secondNext).not.toHaveBeenCalled();
+    expect(status).toHaveBeenCalledWith(401);
+  });
+
+  test('should not treat distinct signatures as replays of each other', () => {
+    const secret = 'secret';
+    const ts = getUnixTime();
+    const method = 'POST';
+    const path = '/v2/swap/submarine';
+
+    const makeReq = (body: string) =>
+      ({
+        get: jest.fn().mockImplementation((name: string) => {
+          if (name === Auth.timestampHeader) return ts.toString();
+          if (name === Auth.signatureHeader)
+            return sign(secret, ts, method, path, body);
+          return undefined;
+        }),
+        rawBody: body,
+        method,
+        originalUrl: path,
+      }) as any;
+
+    const firstNext = jest.fn();
+    Auth.middleware(Logger.disabledLogger, secret)(
+      makeReq('body one'),
+      {} as any,
+      firstNext,
+    );
+    expect(firstNext).toHaveBeenCalledTimes(1);
+
+    const secondNext = jest.fn();
+    Auth.middleware(Logger.disabledLogger, secret)(
+      makeReq('body two'),
+      {} as any,
+      secondNext,
+    );
+    expect(secondNext).toHaveBeenCalledTimes(1);
   });
 });

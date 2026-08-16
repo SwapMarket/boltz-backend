@@ -20,6 +20,11 @@ class Auth {
 
   private static readonly errorUnauthorized = 'unauthorized';
 
+  // signature (hex) -> unix time it stops being replayable. Only ever
+  // populated with signatures that already passed HMAC verification, so an
+  // attacker without the secret can't grow this by spamming bogus ones
+  private static readonly seenSignatures = new Map<string, number>();
+
   public static middleware = (logger: Logger, secret?: string) => {
     return (req: Request, res: Response, next: NextFunction): void => {
       if (secret === undefined) {
@@ -59,6 +64,29 @@ class Auth {
       !timingSafeEqual(providedBuf, expectedBuf)
     ) {
       throw Auth.errorUnauthorized;
+    }
+
+    Auth.checkReplay(provided, ts);
+  };
+
+  private static checkReplay = (signature: string, ts: number) => {
+    Auth.pruneExpiredSignatures();
+
+    if (Auth.seenSignatures.has(signature)) {
+      throw Auth.errorUnauthorized;
+    }
+
+    // Past this point a replay would fail checkTimestamp on its own anyway
+    Auth.seenSignatures.set(signature, ts + Auth.timestampDeltaTolerance);
+  };
+
+  private static pruneExpiredSignatures = () => {
+    const now = getUnixTime();
+
+    for (const [signature, expiry] of Auth.seenSignatures) {
+      if (expiry <= now) {
+        Auth.seenSignatures.delete(signature);
+      }
     }
   };
 

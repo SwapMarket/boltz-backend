@@ -7,13 +7,20 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 use tracing::warn;
 
 const SIGNATURE_HEADER: &str = "x-api-signature";
 const TIMESTAMP_HEADER: &str = "x-api-timestamp";
-const TIMESTAMP_TOLERANCE_SECS: u64 = 60;
+const TIMESTAMP_TOLERANCE_SECS: i64 = 60;
 const MAX_BODY_SIZE: usize = 1024 * 1024;
+
+// signature -> unix time it stops being replayable. Only ever populated
+// with signatures that already passed HMAC verification, so an attacker
+// without the secret can't grow this by spamming bogus ones
+static SEEN_SIGNATURES: LazyLock<Mutex<HashMap<Vec<u8>, i64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 // Restricts the API to callers that know the configured "authSecret", by
 // requiring an HMAC-SHA256 of "<ts><method><path><body>", keyed by that
@@ -58,10 +65,13 @@ pub async fn auth_middleware(
     };
 
     let verified = match (&ts, &provided) {
-        (Some(ts), Some(provided)) => {
-            check_timestamp(ts)
-                && verify(&secret, ts, method.as_str(), &path, &body_bytes, provided)
-        }
+        (Some(ts), Some(provided)) => match check_timestamp(ts) {
+            Some(ts_num) => {
+                verify(&secret, ts, method.as_str(), &path, &body_bytes, provided)
+                    && check_replay(provided, ts_num)
+            }
+            None => false,
+        },
         _ => false,
     };
 
@@ -74,13 +84,15 @@ pub async fn auth_middleware(
         .await
 }
 
-fn check_timestamp(ts: &str) -> bool {
-    let Ok(provided) = ts.parse::<i64>() else {
-        return false;
-    };
+fn check_timestamp(ts: &str) -> Option<i64> {
+    let provided = ts.parse::<i64>().ok()?;
     let now = chrono::Utc::now().timestamp();
 
-    now.abs_diff(provided) <= TIMESTAMP_TOLERANCE_SECS
+    if now.abs_diff(provided) <= TIMESTAMP_TOLERANCE_SECS as u64 {
+        Some(provided)
+    } else {
+        None
+    }
 }
 
 fn verify(secret: &str, ts: &str, method: &str, path: &str, body: &[u8], provided: &[u8]) -> bool {
@@ -92,6 +104,20 @@ fn verify(secret: &str, ts: &str, method: &str, path: &str, body: &[u8], provide
     mac.update(path.as_bytes());
     mac.update(body);
     mac.verify_slice(provided).is_ok()
+}
+
+fn check_replay(signature: &[u8], ts: i64) -> bool {
+    let now = chrono::Utc::now().timestamp();
+    let mut seen = SEEN_SIGNATURES.lock().unwrap();
+    seen.retain(|_, expiry| *expiry > now);
+
+    if seen.contains_key(signature) {
+        return false;
+    }
+
+    // Past this point a replay would fail check_timestamp on its own anyway
+    seen.insert(signature.to_vec(), ts + TIMESTAMP_TOLERANCE_SECS);
+    true
 }
 
 fn unauthorized() -> Response<Body> {
@@ -233,7 +259,7 @@ mod test {
     #[tokio::test]
     async fn test_correct_signature_accepted() {
         let secret = "secret";
-        let body = "some body";
+        let body = "correct signature test body";
         let ts = now();
 
         let res = router(Some(Arc::new(secret.to_string())))
@@ -301,5 +327,100 @@ mod test {
             .unwrap();
 
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_replayed_signature_rejected() {
+        let secret = "secret";
+        let ts = now();
+        let body = "replayed signature test body";
+        let signature = sign(secret, &ts, "POST", "/", body);
+
+        let app = router(Some(Arc::new(secret.to_string())));
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header(TIMESTAMP_HEADER, &ts)
+                    .header(SIGNATURE_HEADER, &signature)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header(TIMESTAMP_HEADER, &ts)
+                    .header(SIGNATURE_HEADER, &signature)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(second.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_distinct_signatures_not_treated_as_replays() {
+        let secret = "secret";
+        let ts = now();
+
+        let app = router(Some(Arc::new(secret.to_string())));
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header(TIMESTAMP_HEADER, &ts)
+                    .header(
+                        SIGNATURE_HEADER,
+                        sign(
+                            secret,
+                            &ts,
+                            "POST",
+                            "/",
+                            "distinct signatures test body one",
+                        ),
+                    )
+                    .body(Body::from("distinct signatures test body one"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header(TIMESTAMP_HEADER, &ts)
+                    .header(
+                        SIGNATURE_HEADER,
+                        sign(
+                            secret,
+                            &ts,
+                            "POST",
+                            "/",
+                            "distinct signatures test body two",
+                        ),
+                    )
+                    .body(Body::from("distinct signatures test body two"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
     }
 }
