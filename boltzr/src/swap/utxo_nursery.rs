@@ -161,6 +161,13 @@ impl UtxoNursery {
     ) -> Result<()> {
         let mut relevant_swaps = self.tx_checker.check(symbol, txs, confirmed)?;
         if self.relevant_txs.receiver_count() == 0 {
+            if !relevant_swaps.is_empty() {
+                error!(
+                    "UTXO nursery found {} relevant {} transaction(s) but has no subscriber to notify - swap detection will be missed until the client reconnects",
+                    relevant_swaps.len(),
+                    symbol
+                );
+            }
             return Ok(());
         }
 

@@ -426,14 +426,15 @@ class Sidecar extends BaseClient<
       },
     );
 
-    this.subscribeSwapUpdatesCall.on('error', (err) => {
-      this.logger.warn(
-        `Swap updates streaming call threw error: ${formatError(err)}`,
-      );
+    this.subscribeSwapUpdatesCall.on('error', async (err) => {
       this.subscribeSwapUpdatesCall = undefined;
+      await this.handleSubscriptionError('Swap updates', err);
     });
 
     this.subscribeSwapUpdatesCall.on('end', () => {
+      // Deliberately not routed through handleSubscriptionError/reconnect:
+      // removeAllListeners() here would also wipe unrelated eventHandler
+      // listeners (SwapInfos, notifiers, Service) that this stream doesn't own
       this.eventHandler.removeAllListeners();
 
       if (this.subscribeSwapUpdatesCall !== undefined) {
@@ -483,18 +484,18 @@ class Sidecar extends BaseClient<
       },
     );
 
-    this.subscribeSendSwapUpdatesCall.on('error', (err) => {
-      this.logger.warn(
-        `Send swap updates streaming call threw error: ${formatError(err)}`,
-      );
+    this.subscribeSendSwapUpdatesCall.on('error', async (err) => {
       this.subscribeSendSwapUpdatesCall = undefined;
+      await this.handleSubscriptionError('Send swap updates', err);
     });
 
-    this.subscribeSendSwapUpdatesCall.on('end', () => {
+    this.subscribeSendSwapUpdatesCall.on('end', async () => {
       if (this.subscribeSendSwapUpdatesCall !== undefined) {
         this.subscribeSendSwapUpdatesCall.cancel();
         this.subscribeSendSwapUpdatesCall = undefined;
       }
+
+      await this.handleSubscriptionError('Send swap updates');
     });
   };
 
@@ -631,16 +632,18 @@ class Sidecar extends BaseClient<
       });
     });
 
-    this.subscribeBlockAddedCall.on('error', (err) => {
-      this.logger.warn(`Block added stream threw error: ${formatError(err)}`);
+    this.subscribeBlockAddedCall.on('error', async (err) => {
       this.subscribeBlockAddedCall = undefined;
+      await this.handleSubscriptionError('Block added', err);
     });
 
-    this.subscribeBlockAddedCall.on('end', () => {
+    this.subscribeBlockAddedCall.on('end', async () => {
       if (this.subscribeBlockAddedCall !== undefined) {
         this.subscribeBlockAddedCall.cancel();
         this.subscribeBlockAddedCall = undefined;
       }
+
+      await this.handleSubscriptionError('Block added');
     });
   };
 
@@ -692,19 +695,64 @@ class Sidecar extends BaseClient<
       },
     );
 
-    this.subscribeRelevantTransactionCall.on('error', (err) => {
-      this.logger.warn(
-        `Relevant transaction stream threw error: ${formatError(err)}`,
-      );
+    this.subscribeRelevantTransactionCall.on('error', async (err) => {
       this.subscribeRelevantTransactionCall = undefined;
+      await this.handleSubscriptionError('Relevant transaction', err);
     });
 
-    this.subscribeRelevantTransactionCall.on('end', () => {
+    this.subscribeRelevantTransactionCall.on('end', async () => {
       if (this.subscribeRelevantTransactionCall !== undefined) {
         this.subscribeRelevantTransactionCall.cancel();
         this.subscribeRelevantTransactionCall = undefined;
       }
+
+      await this.handleSubscriptionError('Relevant transaction');
     });
+  };
+
+  private handleSubscriptionError = async (
+    subscriptionName: string,
+    err?: any,
+  ) => {
+    this.logger.warn(
+      err !== undefined
+        ? `${subscriptionName} stream threw error: ${formatError(err)}`
+        : `${subscriptionName} stream ended`,
+    );
+
+    if (this.isConnected()) {
+      this.setClientStatus(ClientStatus.Disconnected);
+      await this.reconnect();
+    }
+  };
+
+  private reconnect = async () => {
+    try {
+      await this.getInfo();
+
+      this.logger.info(`Reestablished connection to ${this.serviceName()}`);
+
+      this.clearReconnectTimer();
+
+      this.subscribeSwapUpdates();
+      this.subscribeSendSwapUpdates();
+      this.subscribeBlockAdded();
+      this.subscribeRelevantTransaction();
+
+      this.setClientStatus(ClientStatus.Connected);
+    } catch (err) {
+      this.setClientStatus(ClientStatus.Disconnected);
+
+      this.logger.warn(
+        `Could not reconnect to ${this.serviceName()}: ${formatError(err)}`,
+      );
+      this.logger.info(`Retrying in ${this.RECONNECT_INTERVAL} ms`);
+
+      this.reconnectionTimer = setTimeout(
+        this.reconnect,
+        this.RECONNECT_INTERVAL,
+      );
+    }
   };
 
   private tryConnect = async (withSubscriptions: boolean = true) => {

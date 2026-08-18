@@ -1,7 +1,7 @@
 import { randomBytes } from 'crypto';
 import Logger from '../../../lib/Logger';
 import { getVersion } from '../../../lib/Utils';
-import { SwapUpdateEvent } from '../../../lib/consts/Enums';
+import { ClientStatus, SwapUpdateEvent } from '../../../lib/consts/Enums';
 import type * as sidecarrpc from '../../../lib/proto/boltzr';
 import Sidecar from '../../../lib/sidecar/Sidecar';
 
@@ -139,6 +139,93 @@ describe('Sidecar', () => {
       expect(update.status).toEqual(SwapUpdateEvent.TransactionRefunded);
       expect(transaction.id).toEqual('refund-tx');
       expect(transaction.confirmed).toEqual(true);
+    });
+  });
+
+  describe('reconnect', () => {
+    const createStreamMock = () => ({
+      on: jest.fn().mockReturnThis(),
+      write: jest.fn(),
+      cancel: jest.fn(),
+    });
+
+    const setupClientMock = () => {
+      const streams = {
+        swapUpdate: createStreamMock(),
+        sendSwapUpdate: createStreamMock(),
+        blockAdded: createStreamMock(),
+        transactionFound: createStreamMock(),
+      };
+
+      sidecar['client'] = {
+        swapUpdate: jest.fn().mockReturnValue(streams.swapUpdate),
+        sendSwapUpdate: jest.fn().mockReturnValue(streams.sendSwapUpdate),
+        blockAdded: jest.fn().mockReturnValue(streams.blockAdded),
+        transactionFound: jest.fn().mockReturnValue(streams.transactionFound),
+      } as any;
+      sidecar['eventHandler'] = {
+        on: jest.fn(),
+        removeAllListeners: jest.fn(),
+      } as any;
+
+      return streams;
+    };
+
+    // Regression test for a silent, permanent loss of lockup transaction
+    // detection: the "relevant transaction" stream from the sidecar could
+    // die without ever being resubscribed, since its error/end handlers
+    // only cleared the local reference instead of reconnecting
+    test('should resubscribe all sidecar streams when the relevant transaction stream errors while connected', async () => {
+      const streams = setupClientMock();
+      sidecar.getInfo = jest.fn().mockResolvedValue({ version: getVersion() });
+
+      sidecar['setClientStatus'](ClientStatus.Connected);
+      sidecar['subscribeRelevantTransaction']();
+
+      const errorHandler = streams.transactionFound.on.mock.calls.find(
+        ([event]) => event === 'error',
+      )![1];
+
+      await errorHandler(new Error('stream died'));
+
+      expect(sidecar['client']!.transactionFound).toHaveBeenCalledTimes(2);
+      expect(sidecar['client']!.blockAdded).toHaveBeenCalledTimes(1);
+      expect(sidecar['client']!.swapUpdate).toHaveBeenCalledTimes(1);
+      expect(sidecar['client']!.sendSwapUpdate).toHaveBeenCalledTimes(1);
+      expect(sidecar.isConnected()).toBe(true);
+    });
+
+    test('should resubscribe when the block added stream ends while connected', async () => {
+      const streams = setupClientMock();
+      sidecar.getInfo = jest.fn().mockResolvedValue({ version: getVersion() });
+
+      sidecar['setClientStatus'](ClientStatus.Connected);
+      sidecar['subscribeBlockAdded']();
+
+      const endHandler = streams.blockAdded.on.mock.calls.find(
+        ([event]) => event === 'end',
+      )![1];
+
+      await endHandler();
+
+      expect(sidecar['client']!.blockAdded).toHaveBeenCalledTimes(2);
+      expect(sidecar.isConnected()).toBe(true);
+    });
+
+    test('should not attempt to reconnect if already disconnected', async () => {
+      const streams = setupClientMock();
+      sidecar.getInfo = jest.fn().mockResolvedValue({ version: getVersion() });
+
+      sidecar['setClientStatus'](ClientStatus.Disconnected);
+      sidecar['subscribeRelevantTransaction']();
+
+      const errorHandler = streams.transactionFound.on.mock.calls.find(
+        ([event]) => event === 'error',
+      )![1];
+
+      await errorHandler(new Error('stream died'));
+
+      expect(sidecar['client']!.transactionFound).toHaveBeenCalledTimes(1);
     });
   });
 });
