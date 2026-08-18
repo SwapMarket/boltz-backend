@@ -36,12 +36,12 @@ class SwapRepository {
   public static getSwapsExpirable = (height: number): Promise<Swap[]> => {
     return Swap.findAll({
       where: {
+        // InvoicePending/InvoicePaid must be excluded too: those mean an outgoing
+        // Lightning payment may still be in flight, and TransactionClaimPending means
+        // a claim is already queued with the preimage in hand - expiring either would
+        // race a refund against an outcome that just hasn't been confirmed yet
         status: {
-          [Op.notIn]: [
-            SwapUpdateEvent.SwapExpired,
-            SwapUpdateEvent.InvoiceFailedToPay,
-            SwapUpdateEvent.TransactionClaimed,
-          ],
+          [Op.notIn]: SwapRepository.lockupNonUpdatableStatuses,
         },
         timeoutBlockHeight: {
           [Op.lte]: height,

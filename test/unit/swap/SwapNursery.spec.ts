@@ -192,6 +192,16 @@ describe('SwapNursery', () => {
     (SwapRepository.getSwap as jest.Mock).mockImplementation(async () => {
       return mockGetSwapResult;
     });
+    // jest.mock(SwapRepository) automocks static properties away to "[]";
+    // restore the real value since expireSwap's guard depends on it
+    (SwapRepository as any).lockupNonUpdatableStatuses = [
+      SwapUpdateEvent.InvoicePending,
+      SwapUpdateEvent.InvoicePaid,
+      SwapUpdateEvent.InvoiceFailedToPay,
+      SwapUpdateEvent.TransactionClaimPending,
+      SwapUpdateEvent.TransactionClaimed,
+      SwapUpdateEvent.SwapExpired,
+    ];
 
     (ChainSwapRepository.getChainSwap as jest.Mock).mockImplementation(
       async () => {
@@ -3831,6 +3841,26 @@ describe('SwapNursery', () => {
         failureReason: Errors.ONCHAIN_HTLC_TIMED_OUT().message,
       });
     });
+
+    test.each`
+      status
+      ${SwapUpdateEvent.InvoicePending}
+      ${SwapUpdateEvent.InvoicePaid}
+      ${SwapUpdateEvent.TransactionClaimPending}
+    `(
+      'should not expire submarine swaps whose current status is $status',
+      async ({ status }) => {
+        mockGetSwapResult = { ...mockExpiredSwap, status };
+
+        const emitSpy = jest.fn();
+        swapNursery.once('expiration', emitSpy);
+
+        await (swapNursery as any).expireSwap(mockExpiredSwap);
+
+        expect(SwapRepository.setSwapStatus).not.toHaveBeenCalled();
+        expect(emitSpy).not.toHaveBeenCalled();
+      },
+    );
   });
 
   describe('handleSwapSendFailed', () => {

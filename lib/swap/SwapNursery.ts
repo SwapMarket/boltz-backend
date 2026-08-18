@@ -2575,7 +2575,11 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
       id: swap.id,
     });
 
-    if (queriedSwap!.status === SwapUpdateEvent.SwapExpired) {
+    if (
+      SwapRepository.lockupNonUpdatableStatuses.includes(
+        queriedSwap!.status as SwapUpdateEvent,
+      )
+    ) {
       return;
     }
 
