@@ -4,7 +4,10 @@ import { NodeType } from '../../db/models/ReverseSwap';
 import LightningNursery from '../../swap/LightningNursery';
 import type { LightningClient, PaymentResponse } from '../LightningClient';
 import ClnClient from '../cln/ClnClient';
-import NodePendingPaymentTracker from './NodePendingPaymentTracker';
+import NodePendingPaymentTracker, {
+  PaymentStatusKind,
+  type PaymentStatusResult,
+} from './NodePendingPaymentTracker';
 
 class ClnPendingPaymentTracker extends NodePendingPaymentTracker {
   private static readonly checkInterval = 15;
@@ -76,6 +79,42 @@ class ClnPendingPaymentTracker extends NodePendingPaymentTracker {
     ClnClient.isRpcError(error)
       ? ClnClient.formatPaymentFailureReason(error as any)
       : formatError(error);
+
+  public checkPaymentStatus = async (
+    client: LightningClient,
+    invoice: string,
+    preimageHash: string,
+  ): Promise<PaymentStatusResult> => {
+    try {
+      const { decoded, pays } = await (client as ClnClient).listPays(invoice);
+
+      // No persisted attempt yet does not mean the payment failed: an xpay in
+      // flight may not have recorded a sendpay attempt. Treat it as pending so
+      // no second payment is dispatched.
+      if (pays.length === 0) {
+        return { kind: PaymentStatusKind.Pending };
+      }
+
+      const res = await (client as ClnClient).checkListPaysStatus(decoded, pays);
+      if (res !== undefined) {
+        return { kind: PaymentStatusKind.Succeeded, response: res };
+      }
+
+      return { kind: PaymentStatusKind.Pending };
+    } catch (e) {
+      if (e === ClnClient.paymentPendingError) {
+        return { kind: PaymentStatusKind.Pending };
+      }
+      if (e === ClnClient.paymentAllAttemptsFailed || this.isPermanentError(e)) {
+        return { kind: PaymentStatusKind.Failed };
+      }
+      // Inconclusive lookup: never assume the payment is dead.
+      this.logger.warn(
+        `Could not determine CLN payment status of ${preimageHash} on ${client.id}, treating as unknown: ${this.parseErrorMessage(e)}`,
+      );
+      return { kind: PaymentStatusKind.Unknown };
+    }
+  };
 
   private checkPendingPayments = async () => {
     for (const [

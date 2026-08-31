@@ -20,6 +20,8 @@ class MockTracker extends NodePendingPaymentTracker {
   public isPermanentError = jest.fn();
 
   public parseErrorMessage = jest.fn();
+
+  public checkPaymentStatus = jest.fn();
 }
 
 describe('NodePendingPaymentTracker', () => {

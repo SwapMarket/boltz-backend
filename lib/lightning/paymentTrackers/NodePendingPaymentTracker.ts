@@ -6,6 +6,19 @@ import { nodeTypeToPrettyString } from '../../db/models/ReverseSwap';
 import LightningPaymentRepository from '../../db/repositories/LightningPaymentRepository';
 import type { LightningClient, PaymentResponse } from '../LightningClient';
 
+export enum PaymentStatusKind {
+  Pending = 'pending',
+  Succeeded = 'succeeded',
+  Failed = 'failed',
+  Unknown = 'unknown',
+}
+
+export type PaymentStatusResult =
+  | { kind: PaymentStatusKind.Pending }
+  | { kind: PaymentStatusKind.Succeeded; response: PaymentResponse }
+  | { kind: PaymentStatusKind.Failed }
+  | { kind: PaymentStatusKind.Unknown };
+
 abstract class NodePendingPaymentTracker {
   protected constructor(
     protected readonly logger: Logger,
@@ -28,6 +41,17 @@ abstract class NodePendingPaymentTracker {
   public abstract isPermanentError(err: unknown): boolean;
 
   public abstract parseErrorMessage(error: unknown): string;
+
+  /**
+   * Query the node for its authoritative status of a payment. Used before
+   * dispatching a payment to a *different* node to make sure an attempt on
+   * another node is not still live, which would settle the invoice twice.
+   */
+  public abstract checkPaymentStatus(
+    client: LightningClient,
+    invoice: string,
+    preimageHash: string,
+  ): Promise<PaymentStatusResult>;
 
   protected handleSucceededPayment = async (
     client: LightningClient,

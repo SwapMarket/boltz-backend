@@ -728,4 +728,141 @@ describe('PendingPaymentTracker', () => {
       );
     });
   });
+
+  describe('resolveCrossNodePayment', () => {
+    const paymentHash = getHexString(randomBytes(32));
+    const swap = {
+      id: 'swap-cross',
+      invoice: 'lnbcrt-cross',
+    } as unknown as Swap;
+    const chosenNode = {
+      id: 'lnd-1',
+      type: NodeType.LND,
+      symbol: 'BTC',
+    } as unknown as LightningClient;
+    const clnClient = {
+      id: 'cln-1',
+      type: NodeType.CLN,
+      symbol: 'BTC',
+    } as unknown as LightningClient;
+
+    const otherNodeTempFailure = [
+      {
+        nodeId: 'cln-1',
+        status: LightningPaymentStatus.TemporaryFailure,
+      } as LightningPayment,
+    ];
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+      (tracker as any).lightningNodes.get('BTC').set('cln-1', clnClient);
+      LightningPaymentRepository.setStatus = jest.fn();
+      tracker.lightningTrackers[NodeType.CLN].watchPayment = jest.fn();
+      tracker.lightningTrackers[NodeType.CLN].checkPaymentStatus = jest.fn();
+    });
+
+    test('should proceed when there is no attempt on another node', async () => {
+      const res = await tracker['resolveCrossNodePayment'](
+        swap,
+        paymentHash,
+        chosenNode,
+        [
+          {
+            nodeId: 'lnd-1',
+            status: LightningPaymentStatus.TemporaryFailure,
+          } as LightningPayment,
+        ],
+      );
+
+      expect(res).toEqual({ action: 'proceed' });
+      expect(
+        tracker.lightningTrackers[NodeType.CLN].checkPaymentStatus,
+      ).not.toHaveBeenCalled();
+    });
+
+    test('should abstain while a previous attempt is still pending', async () => {
+      tracker.lightningTrackers[NodeType.CLN].checkPaymentStatus = jest
+        .fn()
+        .mockResolvedValue({ kind: 'pending' });
+
+      const res = await tracker['resolveCrossNodePayment'](
+        swap,
+        paymentHash,
+        chosenNode,
+        otherNodeTempFailure,
+      );
+
+      expect(res).toEqual({ action: 'abstain' });
+      expect(
+        tracker.lightningTrackers[NodeType.CLN].watchPayment,
+      ).toHaveBeenCalledWith(clnClient, swap.invoice, paymentHash);
+    });
+
+    test('should abstain when the previous attempt status is unknown', async () => {
+      tracker.lightningTrackers[NodeType.CLN].checkPaymentStatus = jest
+        .fn()
+        .mockResolvedValue({ kind: 'unknown' });
+
+      const res = await tracker['resolveCrossNodePayment'](
+        swap,
+        paymentHash,
+        chosenNode,
+        otherNodeTempFailure,
+      );
+
+      expect(res).toEqual({ action: 'abstain' });
+    });
+
+    test('should settle when the previous attempt already succeeded', async () => {
+      const response = { feeMsat: 21, preimage: randomBytes(32) };
+      tracker.lightningTrackers[NodeType.CLN].checkPaymentStatus = jest
+        .fn()
+        .mockResolvedValue({ kind: 'succeeded', response });
+
+      const res = await tracker['resolveCrossNodePayment'](
+        swap,
+        paymentHash,
+        chosenNode,
+        otherNodeTempFailure,
+      );
+
+      expect(res).toEqual({ action: 'settle', response });
+      expect(LightningPaymentRepository.setStatus).toHaveBeenCalledWith(
+        paymentHash,
+        'cln-1',
+        LightningPaymentStatus.Success,
+      );
+    });
+
+    test('should proceed when the previous attempt terminally failed', async () => {
+      tracker.lightningTrackers[NodeType.CLN].checkPaymentStatus = jest
+        .fn()
+        .mockResolvedValue({ kind: 'failed' });
+
+      const res = await tracker['resolveCrossNodePayment'](
+        swap,
+        paymentHash,
+        chosenNode,
+        otherNodeTempFailure,
+      );
+
+      expect(res).toEqual({ action: 'proceed' });
+    });
+
+    test('should abstain when the previous node is unavailable', async () => {
+      const res = await tracker['resolveCrossNodePayment'](
+        swap,
+        paymentHash,
+        chosenNode,
+        [
+          {
+            nodeId: 'cln-missing',
+            status: LightningPaymentStatus.TemporaryFailure,
+          } as LightningPayment,
+        ],
+      );
+
+      expect(res).toEqual({ action: 'abstain' });
+    });
+  });
 });

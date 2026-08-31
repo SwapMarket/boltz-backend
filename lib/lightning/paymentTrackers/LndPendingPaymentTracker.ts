@@ -8,7 +8,10 @@ import {
 import LightningNursery from '../../swap/LightningNursery';
 import type { LightningClient, PaymentResponse } from '../LightningClient';
 import LndClient from '../LndClient';
-import NodePendingPaymentTracker from './NodePendingPaymentTracker';
+import NodePendingPaymentTracker, {
+  PaymentStatusKind,
+  type PaymentStatusResult,
+} from './NodePendingPaymentTracker';
 
 class LndPendingPaymentTracker extends NodePendingPaymentTracker {
   private static readonly rewatchInterval = 15;
@@ -82,6 +85,44 @@ class LndPendingPaymentTracker extends NodePendingPaymentTracker {
       () => this.watchPayment(client, '', preimageHash),
       LndPendingPaymentTracker.rewatchInterval * 1_000,
     ).unref();
+  };
+
+  public checkPaymentStatus = async (
+    client: LightningClient,
+    _invoice: string,
+    preimageHash: string,
+  ): Promise<PaymentStatusResult> => {
+    try {
+      const res = await (client as LndClient).trackPayment(
+        getHexBuffer(preimageHash),
+      );
+
+      switch (res.status) {
+        case Payment_PaymentStatus.SUCCEEDED:
+          return {
+            kind: PaymentStatusKind.Succeeded,
+            response: {
+              feeMsat: fromProtoInt(res.feeMsat),
+              preimage: getHexBuffer(res.paymentPreimage),
+            },
+          };
+
+        case Payment_PaymentStatus.FAILED:
+          return { kind: PaymentStatusKind.Failed };
+
+        default:
+          // IN_FLIGHT / INITIATED: the payment may still settle.
+          return { kind: PaymentStatusKind.Pending };
+      }
+    } catch (error) {
+      // A tracking error is not proof the payment is dead (transient transport
+      // fault, ...). Treat it as unknown so the caller does not risk a second
+      // payment on another node.
+      this.logger.warn(
+        `Could not determine LND payment status of ${preimageHash} on ${client.id}, treating as unknown: ${this.parseErrorMessage(error)}`,
+      );
+      return { kind: PaymentStatusKind.Unknown };
+    }
   };
 
   public isPermanentError = (error: unknown) =>
