@@ -53,7 +53,7 @@ abstract class NodePendingPaymentTracker {
     client: LightningClient,
     preimageHash: string,
     error: any,
-  ) => {
+  ): Promise<boolean> => {
     const isPermanent = this.isPermanentError(error);
 
     const errorMsg = this.parseErrorMessage(error);
@@ -66,7 +66,7 @@ abstract class NodePendingPaymentTracker {
       this.logger.warn(
         `Not failing payment ${preimageHash} because client is not connected`,
       );
-      return;
+      return false;
     }
 
     await LightningPaymentRepository.setStatus(
@@ -77,6 +77,7 @@ abstract class NodePendingPaymentTracker {
         : LightningPaymentStatus.TemporaryFailure,
       isPermanent ? errorMsg : undefined,
     );
+    return true;
   };
 }
 

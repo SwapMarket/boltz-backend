@@ -1,10 +1,10 @@
+import { Status } from '@grpc/grpc-js/build/src/constants';
 import { SwapTreeSerializer } from 'boltz-core';
 import InstrumentedLock from '../../InstrumentedLock';
 import type Logger from '../../Logger';
 import {
   getChainCurrency,
   getHexBuffer,
-  getHexString,
   getLightningCurrency,
   splitPairId,
 } from '../../Utils';
@@ -252,9 +252,7 @@ class MusigSigner {
           throw Errors.INCORRECT_PREIMAGE();
         }
 
-        this.logger.debug(
-          `Got preimage for Reverse Swap ${swap.id}: ${getHexString(preimage)}`,
-        );
+        this.logger.debug(`Got preimage for Reverse Swap ${swap.id}`);
         await WrappedSwapRepository.setPreimage(swap, preimage);
 
         return this.nursery.lock.acquire(
@@ -383,8 +381,14 @@ class MusigSigner {
         if (pendingPayment.status !== Payment_PaymentStatus.FAILED) {
           return true;
         }
-      } catch {
-        /* empty */
+      } catch (e) {
+        // A NOT_FOUND means this node never attempted the payment, so it is safe
+        // to ignore. Any other error is inconclusive (e.g. a transport fault),
+        // so we fail closed and assume a payment might still be in flight to
+        // avoid releasing the refund of a live payment.
+        if ((e as { code?: number } | undefined)?.code !== Status.NOT_FOUND) {
+          return true;
+        }
       }
     }
 
@@ -395,9 +399,21 @@ class MusigSigner {
         return payment !== undefined;
       }
     } catch (e) {
-      // We do have a pending payment when the pending error is thrown
-      // Else, it's some other error and we can allow cooperative refunds
-      return e === ClnClient.paymentPendingError;
+      // A pending payment (HTLC in flight) must block the refund.
+      if (e === ClnClient.paymentPendingError) {
+        return true;
+      }
+
+      // A definitive terminal failure (all attempts failed, no HTLC) is safe:
+      // allow the cooperative refund.
+      if (e === ClnClient.paymentAllAttemptsFailed) {
+        return false;
+      }
+
+      // Any other error is inconclusive (e.g. the boltz<->CLN transport is
+      // down). Fail closed and refuse the cooperative refund; the unilateral
+      // timelock refund remains available as the safe exit.
+      return true;
     }
 
     return false;

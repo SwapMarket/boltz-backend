@@ -11,6 +11,8 @@ import LndClient from '../LndClient';
 import NodePendingPaymentTracker from './NodePendingPaymentTracker';
 
 class LndPendingPaymentTracker extends NodePendingPaymentTracker {
+  private static readonly rewatchInterval = 15;
+
   constructor(logger: Logger) {
     super(logger, NodeType.LND);
   }
@@ -45,19 +47,41 @@ class LndPendingPaymentTracker extends NodePendingPaymentTracker {
             break;
 
           case Payment_PaymentStatus.FAILED:
-            await this.handleFailedPayment(
-              client,
-              preimageHash,
-              res.failureReason,
-            );
+            // If the payment could not be marked failed (e.g. the client is not
+            // connected), keep watching so the still-pending row is not dropped.
+            if (
+              !(await this.handleFailedPayment(
+                client,
+                preimageHash,
+                res.failureReason,
+              ))
+            ) {
+              this.rewatchPayment(client, preimageHash);
+            }
+            break;
+
+          default:
+            // Not a terminal status yet: keep watching instead of dropping it.
+            this.rewatchPayment(client, preimageHash);
             break;
         }
       })
       .catch((error) => {
+        // A stream error (e.g. a transient transport fault) is not proof the
+        // payment failed. Keep watching so the payment is not dropped and left
+        // stuck as "Pending" until the swap expires.
         this.logger.warn(
-          `Tracking payment ${preimageHash} with ${client.symbol} ${client.id} failed: ${this.parseErrorMessage(error)}`,
+          `Tracking payment ${preimageHash} with ${client.symbol} ${client.id} failed, keeping watch: ${this.parseErrorMessage(error)}`,
         );
+        this.rewatchPayment(client, preimageHash);
       });
+  };
+
+  private rewatchPayment = (client: LightningClient, preimageHash: string) => {
+    setTimeout(
+      () => this.watchPayment(client, '', preimageHash),
+      LndPendingPaymentTracker.rewatchInterval * 1_000,
+    ).unref();
   };
 
   public isPermanentError = (error: unknown) =>

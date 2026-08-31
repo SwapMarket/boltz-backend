@@ -82,32 +82,53 @@ class ClnPendingPaymentTracker extends NodePendingPaymentTracker {
       preimageHash,
       { client, invoice },
     ] of this.paymentsToWatch.entries()) {
+      // Only stop watching a payment once we have a definitive answer from the
+      // node (it succeeded or terminally failed). A failed/empty status lookup
+      // is inconclusive and must never be turned into a failure, otherwise a
+      // transient boltz<->CLN RPC fault would let us abandon a still-live
+      // payment and release the swap's refund (double spend).
+      let resolved = false;
+
       try {
         const { decoded, pays } = await client.listPays(invoice);
-        const res = await client.checkListPaysStatus(decoded, pays);
+
         if (pays.length === 0) {
-          this.handleFailedPayment(
-            client,
-            preimageHash,
-            'no attempts have been made',
+          // An empty listPays result does not imply the payment failed: an xpay
+          // that has not (yet) persisted a sendpay attempt leaves no entry while
+          // the payment is still in flight. Keep watching.
+          this.logger.silly(
+            `No CLN pay attempts recorded yet for payment ${preimageHash}; keeping watch`,
           );
         } else {
-          if (res === undefined) {
-            continue;
+          const res = await client.checkListPaysStatus(decoded, pays);
+          if (res !== undefined) {
+            await this.handleSucceededPayment(client, preimageHash, res);
+            resolved = true;
           }
-
-          await this.handleSucceededPayment(client, preimageHash, res);
         }
       } catch (e) {
-        // Ignore when the payment is pending; it's not a payment error
         if (e === ClnClient.paymentPendingError) {
-          continue;
+          // The payment is still in flight; keep watching.
+        } else if (
+          e === ClnClient.paymentAllAttemptsFailed ||
+          this.isPermanentError(e)
+        ) {
+          // A definitive terminal failure reported by the node (all attempts
+          // failed with no HTLC in flight, or a permanent error).
+          resolved = await this.handleFailedPayment(client, preimageHash, e);
+        } else {
+          // Inconclusive lookup (transport/RPC error, listPeerChannels failure,
+          // ...). Never convert this into a failure status: keep watching until
+          // the node gives a definitive answer.
+          this.logger.warn(
+            `Could not check status of pending CLN payment ${preimageHash}, keeping watch: ${this.parseErrorMessage(e)}`,
+          );
         }
-
-        await this.handleFailedPayment(client, preimageHash, e);
       }
 
-      this.paymentsToWatch.delete(preimageHash);
+      if (resolved) {
+        this.paymentsToWatch.delete(preimageHash);
+      }
     }
   };
 }

@@ -750,16 +750,20 @@ class SwapManager {
         // to emit it before trying to claim the swap
         emitSwapInvoiceSet(updatedSwap.id);
 
-        // If the onchain coins were sent already and the lockup transaction is confirmed
-        // the swap should be settled directly
+        // If the onchain coins were sent already and the lockup transaction is
+        // confirmed the swap should be settled directly. The confirmed chain
+        // event was consumed before the invoice existed, so let the nursery
+        // re-validate the amounts: it settles within the accepted overpayment
+        // tolerance and otherwise fails the swap explicitly. Previously a
+        // direct settle only happened on an exact amount match, silently
+        // leaving any (even 1 sat) mismatch stuck in "invoice.set" until the
+        // invoice expired.
         if (
           updatedSwap.lockupTransactionId &&
-          statusBeforeUpdate === SwapUpdateEvent.TransactionConfirmed &&
-          swap.expectedAmount === swap.onchainAmount &&
-          updatedSwap.expectedAmount === updatedSwap.onchainAmount
+          statusBeforeUpdate === SwapUpdateEvent.TransactionConfirmed
         ) {
           try {
-            await this.nursery.attemptSettleSwap(
+            await this.nursery.settleConfirmedLockup(
               receivingCurrency,
               updatedSwap,
             );

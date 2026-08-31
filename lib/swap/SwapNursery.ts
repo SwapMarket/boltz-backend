@@ -175,7 +175,7 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
     private readonly claimer: DeferredClaimer,
     private readonly chainSwapSigner: ChainSwapSigner,
     lockupTransactionTracker: LockupTransactionTracker,
-    overpaymentProtector: OverpaymentProtector,
+    private readonly overpaymentProtector: OverpaymentProtector,
     paymentTimeoutMinutes?: number,
     sendApprovalDefaultAction?: string,
   ) {
@@ -1051,6 +1051,59 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
     }
 
     return fetched;
+  };
+
+  /**
+   * Settles a Submarine Swap whose lockup was already confirmed before the
+   * invoice was set ("lock first" flow). The confirmed chain event was consumed
+   * before the invoice existed, so the amount validation {@link UtxoNursery}
+   * performs on a fresh lockup is repeated here: settle within the accepted
+   * overpayment tolerance, otherwise fail the swap explicitly so the user
+   * becomes eligible for a cooperative refund immediately instead of waiting
+   * for the invoice to expire.
+   *
+   * Must be called while holding {@link SwapNursery.swapLock} (like
+   * {@link attemptSettleSwap} and {@link lockupFailed}); the only caller,
+   * `SwapManager.setSwapInvoice`, already runs inside that lock.
+   */
+  public settleConfirmedLockup = async (
+    currency: Currency,
+    swap: Swap,
+  ): Promise<void> => {
+    const { expectedAmount, onchainAmount } = swap;
+
+    if (
+      expectedAmount !== null &&
+      expectedAmount !== undefined &&
+      onchainAmount !== null &&
+      onchainAmount !== undefined
+    ) {
+      if (expectedAmount > onchainAmount) {
+        await this.lockupFailed(
+          swap,
+          onchainAmount === 0
+            ? Errors.INCORRECT_ASSET_SENT().message
+            : Errors.INSUFFICIENT_AMOUNT(onchainAmount, expectedAmount).message,
+        );
+        return;
+      }
+
+      if (
+        this.overpaymentProtector.isUnacceptableOverpay(
+          swap.type,
+          expectedAmount,
+          onchainAmount,
+        )
+      ) {
+        await this.lockupFailed(
+          swap,
+          Errors.OVERPAID_AMOUNT(onchainAmount, expectedAmount).message,
+        );
+        return;
+      }
+    }
+
+    await this.attemptSettleSwap(currency, swap);
   };
 
   public attemptSettleSwap = async (

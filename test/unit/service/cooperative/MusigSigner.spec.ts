@@ -7,6 +7,7 @@ import ArkClient from '../../../../lib/chain/ArkClient';
 import {
   CurrencyType,
   OrderSide,
+  SwapType,
   SwapUpdateEvent,
   SwapVersion,
 } from '../../../../lib/consts/Enums';
@@ -14,7 +15,7 @@ import ReverseSwapRepository from '../../../../lib/db/repositories/ReverseSwapRe
 import SwapRepository from '../../../../lib/db/repositories/SwapRepository';
 import WrappedSwapRepository from '../../../../lib/db/repositories/WrappedSwapRepository';
 import type LndClient from '../../../../lib/lightning/LndClient';
-import type ClnClient from '../../../../lib/lightning/cln/ClnClient';
+import ClnClient from '../../../../lib/lightning/cln/ClnClient';
 import { Signer } from '../../../../lib/proto/boltzrpc';
 import Errors from '../../../../lib/service/Errors';
 import SignerControlRegistry from '../../../../lib/service/SignerControlRegistry';
@@ -617,6 +618,95 @@ describe('MusigSigner', () => {
         2,
         inputCheckpoint,
       );
+    });
+  });
+
+  describe('hasPendingOrSuccessfulLightningPayment', () => {
+    const hasPendingOrSuccessfulLightningPayment = (
+      MusigSigner as any
+    )['hasPendingOrSuccessfulLightningPayment'] as (
+      currency: any,
+      swap: any,
+    ) => Promise<boolean>;
+
+    const swap = {
+      type: SwapType.Submarine,
+      invoice: 'lnbc1invoice',
+      preimageHash: getHexString(randomBytes(32)),
+    };
+
+    const notFoundError = { code: 5 } as any;
+
+    beforeEach(() => {
+      btcLndClient.trackPayment = jest.fn().mockRejectedValue(notFoundError);
+      btcClnClient.checkPayStatus = jest.fn();
+    });
+
+    test('should return false for chain swaps', async () => {
+      await expect(
+        hasPendingOrSuccessfulLightningPayment(btcCurrency, {
+          type: SwapType.Chain,
+        }),
+      ).resolves.toEqual(false);
+    });
+
+    test('should allow refund when payment definitively failed', async () => {
+      (btcClnClient.checkPayStatus as jest.Mock).mockRejectedValue(
+        ClnClient.paymentAllAttemptsFailed,
+      );
+
+      await expect(
+        hasPendingOrSuccessfulLightningPayment(btcCurrency, swap),
+      ).resolves.toEqual(false);
+    });
+
+    test('should allow refund when there is no record of the payment', async () => {
+      (btcClnClient.checkPayStatus as jest.Mock).mockResolvedValue(undefined);
+
+      await expect(
+        hasPendingOrSuccessfulLightningPayment(btcCurrency, swap),
+      ).resolves.toEqual(false);
+    });
+
+    test('should block refund when CLN reports a pending payment', async () => {
+      (btcClnClient.checkPayStatus as jest.Mock).mockRejectedValue(
+        ClnClient.paymentPendingError,
+      );
+
+      await expect(
+        hasPendingOrSuccessfulLightningPayment(btcCurrency, swap),
+      ).resolves.toEqual(true);
+    });
+
+    test('should block refund when CLN returns a successful payment', async () => {
+      (btcClnClient.checkPayStatus as jest.Mock).mockResolvedValue({
+        feeMsat: 1,
+        preimage: randomBytes(32),
+      });
+
+      await expect(
+        hasPendingOrSuccessfulLightningPayment(btcCurrency, swap),
+      ).resolves.toEqual(true);
+    });
+
+    test('should fail closed when the CLN status lookup errors', async () => {
+      (btcClnClient.checkPayStatus as jest.Mock).mockRejectedValue(
+        new Error('14 UNAVAILABLE: transport closed'),
+      );
+
+      await expect(
+        hasPendingOrSuccessfulLightningPayment(btcCurrency, swap),
+      ).resolves.toEqual(true);
+    });
+
+    test('should fail closed when an LND lookup errors with a non NOT_FOUND error', async () => {
+      btcLndClient.trackPayment = jest
+        .fn()
+        .mockRejectedValue({ code: 14 } as any);
+
+      await expect(
+        hasPendingOrSuccessfulLightningPayment(btcCurrency, swap),
+      ).resolves.toEqual(true);
     });
   });
 
