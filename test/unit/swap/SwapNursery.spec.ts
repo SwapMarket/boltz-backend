@@ -33,6 +33,7 @@ import {
   queryERC20SwapValuesFromLock,
   queryEtherSwapValuesFromLock,
 } from '../../../lib/wallet/ethereum/contracts/ContractUtils';
+import NotBroadcastError from '../../../lib/wallet/providers/NotBroadcastError';
 
 let mockGetSwapResult: any = null;
 let mockGetChainSwapResult: any = null;
@@ -754,6 +755,72 @@ describe('SwapNursery', () => {
       expect(
         (handleSwapSendFailedSpy.mock.calls[0][2] as Error).message,
       ).toEqual(Errors.HOOK_REJECTED().message);
+    });
+
+    test.each`
+      description                          | error                                                                 | fails
+      ${'the node refused to send'}        | ${new NotBroadcastError({ code: -6, message: 'Insufficient funds' })} | ${true}
+      ${'the answer to the send was lost'} | ${new Error('socket hang up')}                                        | ${false}
+    `(
+      'should fail a reverse lockup only if nothing went out: $description',
+      async ({ error, fails }) => {
+        const nursery = makeSendApprovalNursery();
+        const wallet = {
+          symbol: 'BTC',
+          sendToAddress: jest.fn().mockRejectedValue(error),
+        };
+        const handleSwapSendFailedSpy = jest
+          .spyOn(nursery as any, 'handleSwapSendFailed')
+          .mockResolvedValue(undefined);
+
+        await (nursery as any).lockupUtxo(
+          reverseSendSwap,
+          { estimateFee: jest.fn().mockResolvedValue(2) },
+          wallet,
+          SendApprovalAction.Accept,
+        );
+
+        expect(wallet.sendToAddress).toHaveBeenCalledTimes(1);
+        expect(handleSwapSendFailedSpy).toHaveBeenCalledTimes(fails ? 1 : 0);
+        if (fails) {
+          expect(mockNotifications.sendMessage).not.toHaveBeenCalled();
+        } else {
+          expect(mockNotifications.sendMessage).toHaveBeenCalledWith(
+            expect.stringContaining('may be on chain'),
+            true,
+            true,
+          );
+        }
+      },
+    );
+
+    test('should not fail a swap whose vHTLC went out before an error', async () => {
+      const nursery = makeSendApprovalNursery();
+      const wallet = {
+        symbol: 'ARK',
+        sendToAddress: jest
+          .fn()
+          .mockResolvedValue({ transactionId: 'txid', vout: 0, fee: 1 }),
+      };
+      (
+        WrappedSwapRepository.setServerLockupTransaction as jest.Mock
+      ).mockRejectedValueOnce(new Error('database is locked'));
+      const handleSwapSendFailedSpy = jest
+        .spyOn(nursery as any, 'handleSwapSendFailed')
+        .mockResolvedValue(undefined);
+
+      await (nursery as any).lockupVtxo(
+        reverseSendSwap,
+        wallet,
+        SendApprovalAction.Accept,
+      );
+
+      expect(handleSwapSendFailedSpy).not.toHaveBeenCalled();
+      expect(mockNotifications.sendMessage).toHaveBeenCalledWith(
+        expect.stringContaining('its ARK transaction is txid'),
+        true,
+        true,
+      );
     });
 
     test('should lock up when the send approval is accepted', async () => {

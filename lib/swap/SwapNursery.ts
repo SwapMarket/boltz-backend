@@ -92,6 +92,7 @@ import {
 } from '../wallet/ethereum/contracts/ContractUtils';
 import type Contracts from '../wallet/ethereum/contracts/Contracts';
 import type ERC20WalletProvider from '../wallet/providers/ERC20WalletProvider';
+import NotBroadcastError from '../wallet/providers/NotBroadcastError';
 import ArkNursery from './ArkNursery';
 import Errors from './Errors';
 import EthereumNursery from './EthereumNursery';
@@ -1985,6 +1986,10 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
     approval: SendApprovalAction,
     lightningClient?: LightningClient,
   ) => {
+    // Set once the wallet is asked to send: from then on, an error may have
+    // come after the lockup went out.
+    let sendAttempted = false;
+
     try {
       this.assertLockupSignerEnabled(swap);
       this.assertSendApproved(approval);
@@ -2021,6 +2026,7 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
           ? (swap as ReverseSwap).lockupAddress
           : (swap as ChainSwapInfo).sendingData.lockupAddress;
 
+      sendAttempted = true;
       const { transaction, transactionId, vout, fee } =
         await wallet.sendToAddress(
           lockupAddress,
@@ -2045,6 +2051,17 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
         ),
       });
     } catch (error) {
+      // Only a refusal by the node, or an error before the send, means
+      // nothing went out
+      if (sendAttempted && !(error instanceof NotBroadcastError)) {
+        await this.lockupMayBeOnChain(
+          swap,
+          error,
+          `check the ${wallet.symbol} wallet for a transaction labelled "${TransactionLabelRepository.lockupLabel(swap)}"`,
+        );
+        return;
+      }
+
       await this.handleSwapSendFailed(
         swap,
         wallet.symbol,
@@ -2065,6 +2082,10 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
     approval: SendApprovalAction,
     lightningClient?: LightningClient,
   ) => {
+    // The lockup transaction, once sent: an error after that must not fail
+    // the swap, since the lockup is out.
+    let sent: string | undefined;
+
     try {
       this.assertLockupSignerEnabled(swap);
       this.assertSendApproved(approval);
@@ -2081,6 +2102,8 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
         undefined,
         TransactionLabelRepository.lockupLabel(swap),
       );
+
+      sent = transactionId;
 
       this.logger.verbose(
         `Locked up ${onchainAmount!} ${
@@ -2099,6 +2122,15 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
         ),
       });
     } catch (error) {
+      if (sent !== undefined) {
+        await this.lockupMayBeOnChain(
+          swap,
+          error,
+          `its ${wallet.symbol} transaction is ${sent}`,
+        );
+        return;
+      }
+
       await this.handleSwapSendFailed(
         swap,
         wallet.symbol,
@@ -2114,6 +2146,10 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
     approval: SendApprovalAction,
     lightningClient?: LightningClient,
   ) => {
+    // The lockup transaction, once sent: an error after that must not fail
+    // the swap, since the lockup is out.
+    let sent: string | undefined;
+
     try {
       this.assertLockupSignerEnabled(swap);
       this.assertSendApproved(approval);
@@ -2154,6 +2190,8 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
         );
       }
 
+      sent = contractTransaction.hash;
+
       const updatedSwap =
         await WrappedSwapRepository.setServerLockupTransaction(
           swap,
@@ -2172,6 +2210,15 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
         swap: updatedSwap,
       });
     } catch (error) {
+      if (sent !== undefined) {
+        await this.lockupMayBeOnChain(
+          swap,
+          error,
+          `its ${wallet.symbol} transaction is ${sent}`,
+        );
+        return;
+      }
+
       await this.handleSwapSendFailed(
         swap,
         wallet.symbol,
@@ -2187,6 +2234,10 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
     approval: SendApprovalAction,
     lightningClient?: LightningClient,
   ) => {
+    // The lockup transaction, once sent: an error after that must not fail
+    // the swap, since the lockup is out.
+    let sent: string | undefined;
+
     try {
       this.assertLockupSignerEnabled(swap);
       this.assertSendApproved(approval);
@@ -2229,6 +2280,7 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
           lockupDetails.timeoutBlockHeight,
         );
       }
+      sent = contractTransaction.hash;
 
       const updatedSwap =
         await WrappedSwapRepository.setServerLockupTransaction(
@@ -2248,6 +2300,15 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
         swap: updatedSwap,
       });
     } catch (error) {
+      if (sent !== undefined) {
+        await this.lockupMayBeOnChain(
+          swap,
+          error,
+          `its ${wallet.symbol} transaction is ${sent}`,
+        );
+        return;
+      }
+
       await this.handleSwapSendFailed(
         swap,
         wallet.symbol,
@@ -2489,6 +2550,23 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
       this.emitClaimFailure(swap, chainCurrency, error);
       throw error;
     }
+  };
+
+  /**
+   * For a lockup that may be on chain although sending it threw. Failing the
+   * swap would cancel a reverse swap's hold invoice, or let a chain swap's
+   * user refund, while the user can still claim our lockup. So the swap is
+   * left as it is (lnd cancels a held invoice itself before its HTLCs
+   * expire) and the operator is alerted to look at it.
+   */
+  private lockupMayBeOnChain = async (
+    swap: ReverseSwap | ChainSwapInfo,
+    error: unknown,
+    whereToLook: string,
+  ) => {
+    const message = `Lockup of ${swapTypeToPrettyString(swap.type)} Swap ${swap.id} may be on chain despite this error; not failing the swap, ${whereToLook}: ${formatError(error)}`;
+    this.logger.error(message);
+    await this.notifications?.sendMessage(message, true, true);
   };
 
   private handleSwapSendFailed = async (
