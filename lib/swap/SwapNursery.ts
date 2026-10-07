@@ -93,6 +93,7 @@ import {
 import type Contracts from '../wallet/ethereum/contracts/Contracts';
 import type ERC20WalletProvider from '../wallet/providers/ERC20WalletProvider';
 import NotBroadcastError from '../wallet/providers/NotBroadcastError';
+import type { SentTransaction } from '../wallet/providers/WalletProviderInterface';
 import ArkNursery from './ArkNursery';
 import Errors from './Errors';
 import EthereumNursery from './EthereumNursery';
@@ -147,6 +148,10 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
   public static readonly swapLock = 'swap';
   public static readonly chainSwapLock = 'chainSwap';
   public static readonly reverseSwapLock = 'reverseSwap';
+
+  // How far before a swap's creation the wallet is searched for its lockup,
+  // in case the node's clock and ours disagree
+  public static readonly walletClockMarginMs = 10 * 60 * 1000;
 
   // The full three-way mapping is intentional: the two-way call sites only ever
   // pass the two types they can encounter, and this agrees with them on those
@@ -1730,6 +1735,11 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
     }
   };
 
+  private swapCreatedAt = (swap: ReverseSwap | ChainSwapInfo): Date =>
+    swap.type === SwapType.ReverseSubmarine
+      ? (swap as ReverseSwap).createdAt
+      : (swap as ChainSwapInfo).chainSwap.createdAt;
+
   private lockupAmount = (swap: ReverseSwap | ChainSwapInfo): number =>
     swap.type === SwapType.ReverseSubmarine
       ? (swap as ReverseSwap).onchainAmount
@@ -2026,14 +2036,41 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
           ? (swap as ReverseSwap).lockupAddress
           : (swap as ChainSwapInfo).sendingData.lockupAddress;
 
+      // A lockup sent before an error that kept it out of the database
+      // leaves the swap eligible to lock up again, on the next start at the
+      // latest; a second lockup to the same address would be claimable with
+      // the same preimage. The wallet is the record of what was sent.
+      let earlierLockup: SentTransaction | undefined;
+      try {
+        earlierLockup = await wallet.findSend(
+          lockupAddress,
+          new Date(
+            this.swapCreatedAt(swap).getTime() -
+              SwapNursery.walletClockMarginMs,
+          ),
+        );
+      } catch (error) {
+        this.logger.error(
+          `Not locking up ${swapTypeToPrettyString(swap.type)} Swap ${swap.id}: could not check whether the ${wallet.symbol} wallet already sent to ${lockupAddress}: ${formatError(error)}`,
+        );
+        return;
+      }
+
+      if (earlierLockup !== undefined) {
+        this.logger.warn(
+          `${swapTypeToPrettyString(swap.type)} Swap ${swap.id} was already locked up in ${earlierLockup.transactionId}; recording it instead of sending again`,
+        );
+      }
+
       sendAttempted = true;
       const { transaction, transactionId, vout, fee } =
-        await wallet.sendToAddress(
+        earlierLockup ??
+        (await wallet.sendToAddress(
           lockupAddress,
           onchainAmount,
           feePerVbyte,
           TransactionLabelRepository.lockupLabel(swap),
-        );
+        ));
       this.logger.verbose(
         `Locked up ${onchainAmount} ${
           wallet.symbol

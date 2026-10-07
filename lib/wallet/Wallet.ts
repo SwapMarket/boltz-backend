@@ -146,6 +146,17 @@ class Wallet implements BalancerFetcher {
     );
   };
 
+  public findSend = (
+    address: string,
+    since: Date,
+  ): Promise<SentTransaction | undefined> => {
+    if (this.walletProvider.findSend === undefined) {
+      return Promise.resolve(undefined);
+    }
+
+    return this.walletProvider.findSend(address, since);
+  };
+
   public sweepWallet = (
     address: string,
     satPerVbyte: number | undefined,

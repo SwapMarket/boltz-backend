@@ -689,6 +689,7 @@ describe('SwapNursery', () => {
       type: SwapType.ReverseSubmarine,
       onchainAmount: 90_000,
       lockupAddress: 'bcrt1reverse',
+      createdAt: new Date(1_700_000_000_000),
     };
 
     test.each`
@@ -767,6 +768,7 @@ describe('SwapNursery', () => {
         const nursery = makeSendApprovalNursery();
         const wallet = {
           symbol: 'BTC',
+          findSend: jest.fn().mockResolvedValue(undefined),
           sendToAddress: jest.fn().mockRejectedValue(error),
         };
         const handleSwapSendFailedSpy = jest
@@ -821,6 +823,117 @@ describe('SwapNursery', () => {
         true,
         true,
       );
+    });
+
+    describe('a lockup the wallet already sent', () => {
+      const earlierLockup = { transactionId: 'earlier', vout: 1, fee: 141 };
+
+      const lockUp = async (findSend: jest.Mock) => {
+        const nursery = makeSendApprovalNursery();
+        const wallet = {
+          symbol: 'BTC',
+          findSend,
+          sendToAddress: jest
+            .fn()
+            .mockResolvedValue({ transactionId: 'new', vout: 0, fee: 150 }),
+        };
+        const handleSwapSendFailedSpy = jest
+          .spyOn(nursery as any, 'handleSwapSendFailed')
+          .mockResolvedValue(undefined);
+        const setServerLockupTransaction = jest
+          .spyOn(WrappedSwapRepository, 'setServerLockupTransaction')
+          .mockImplementation(async (swap) => swap as any);
+        const coinsSent = jest.fn();
+        nursery.on('coins.sent', coinsSent);
+
+        await (nursery as any).lockupUtxo(
+          reverseSendSwap,
+          { estimateFee: jest.fn().mockResolvedValue(2) },
+          wallet,
+          SendApprovalAction.Accept,
+        );
+
+        return {
+          wallet,
+          handleSwapSendFailedSpy,
+          setServerLockupTransaction,
+          coinsSent,
+        };
+      };
+
+      test('should look for it from shortly before the swap was created', async () => {
+        const findSend = jest.fn().mockResolvedValue(undefined);
+        const { wallet, setServerLockupTransaction } = await lockUp(findSend);
+
+        expect(findSend).toHaveBeenCalledWith(
+          reverseSendSwap.lockupAddress,
+          new Date(
+            reverseSendSwap.createdAt.getTime() -
+              SwapNursery.walletClockMarginMs,
+          ),
+        );
+        expect(wallet.sendToAddress).toHaveBeenCalledTimes(1);
+        expect(setServerLockupTransaction).toHaveBeenCalledWith(
+          reverseSendSwap,
+          'new',
+          reverseSendSwap.onchainAmount,
+          150,
+          0,
+        );
+      });
+
+      test('should record an earlier lockup instead of sending again', async () => {
+        const { wallet, setServerLockupTransaction, coinsSent } = await lockUp(
+          jest.fn().mockResolvedValue(earlierLockup),
+        );
+
+        expect(wallet.sendToAddress).not.toHaveBeenCalled();
+        expect(setServerLockupTransaction).toHaveBeenCalledWith(
+          reverseSendSwap,
+          earlierLockup.transactionId,
+          reverseSendSwap.onchainAmount,
+          earlierLockup.fee,
+          earlierLockup.vout,
+        );
+        expect(coinsSent).toHaveBeenCalledTimes(1);
+      });
+
+      test('should neither send nor fail when the wallet cannot tell', async () => {
+        const { wallet, handleSwapSendFailedSpy, setServerLockupTransaction } =
+          await lockUp(jest.fn().mockRejectedValue(new Error('ECONNREFUSED')));
+
+        expect(wallet.sendToAddress).not.toHaveBeenCalled();
+        expect(handleSwapSendFailedSpy).not.toHaveBeenCalled();
+        expect(setServerLockupTransaction).not.toHaveBeenCalled();
+        expect(mockLogger.error).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Not locking up Reverse Swap reverse-swap-id: could not check whether the BTC wallet already sent to bcrt1reverse',
+          ),
+        );
+      });
+
+      test('should not fail the swap when recording an earlier lockup fails', async () => {
+        const nursery = makeSendApprovalNursery();
+        const handleSwapSendFailedSpy = jest
+          .spyOn(nursery as any, 'handleSwapSendFailed')
+          .mockResolvedValue(undefined);
+        jest
+          .spyOn(WrappedSwapRepository, 'setServerLockupTransaction')
+          .mockRejectedValue(new Error('getaddrinfo EAI_AGAIN postgres'));
+
+        await (nursery as any).lockupUtxo(
+          reverseSendSwap,
+          { estimateFee: jest.fn().mockResolvedValue(2) },
+          {
+            symbol: 'BTC',
+            findSend: jest.fn().mockResolvedValue(earlierLockup),
+            sendToAddress: jest.fn(),
+          },
+          SendApprovalAction.Accept,
+        );
+
+        expect(handleSwapSendFailedSpy).not.toHaveBeenCalled();
+      });
     });
 
     test('should lock up when the send approval is accepted', async () => {
