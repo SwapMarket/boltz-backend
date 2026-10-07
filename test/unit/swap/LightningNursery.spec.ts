@@ -235,6 +235,34 @@ describe('LightningNursery', () => {
       mockHtlcs = [];
     });
 
+    test('should check the HTLCs again when the prepayment arrives after them', async () => {
+      mockHtlcs = [{ state: HtlcState.Accepted, expiryHeight: required - 1 }];
+      mockLookupHoldInvoiceState = Invoice_InvoiceState.ACCEPTED;
+      mockGetReverseSwapResult = {
+        id: 'prepaid',
+        invoice,
+        pair: 'BTC/BTC',
+        orderSide: OrderSide.BUY,
+        preimageHash,
+        timeoutBlockHeight,
+        minerFeeInvoice,
+        minerFeeInvoicePreimage,
+      };
+
+      let paid = 0;
+      nursery.on('invoice.paid', () => {
+        paid += 1;
+      });
+
+      await emitHtlcAccepted(minerFeeInvoice);
+
+      expect(paid).toEqual(0);
+      expect(mockSettleHoldInvoice).not.toHaveBeenCalled();
+      expect(mockCancelHoldInvoice).toHaveBeenCalledWith(
+        getHexBuffer(preimageHash),
+      );
+    });
+
     test.each`
       description             | expiry          | locksUp
       ${'one block too soon'} | ${required - 1} | ${false}
@@ -434,7 +462,7 @@ describe('LightningNursery', () => {
 
     // Once for the HTLC expiry when the hold invoice is accepted, once after
     // the prepay
-    expect(mockLookupHoldInvoice).toHaveBeenCalledTimes(2);
+    expect(mockLookupHoldInvoice).toHaveBeenCalledTimes(3);
     expect(mockLookupHoldInvoice).toHaveBeenCalledWith(
       decodeInvoice(invoice).paymentHash,
     );

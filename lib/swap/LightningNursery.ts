@@ -257,6 +257,10 @@ class LightningNursery extends TypedEventEmitter<{
       );
 
       if (holdInvoice.state === InvoiceState.Accepted) {
+        if (!(await this.htlcsOutlastTimeout(lightningClient, reverseSwap))) {
+          return;
+        }
+
         await lightningClient.settleHoldInvoice(
           getHexBuffer(reverseSwap.minerFeeInvoicePreimage!),
         );
