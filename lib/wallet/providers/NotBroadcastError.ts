@@ -1,3 +1,5 @@
+import RpcClient from '../../chain/RpcClient';
+
 /**
  * The node refused to send a transaction: nothing was broadcast.
  *
@@ -14,10 +16,13 @@ class NotBroadcastError extends Error {
     );
   }
 
-  /** A JSON-RPC error: the node answered, and it answered no. */
+  /**
+   * A JSON-RPC error the node replied with: the node answered, and it
+   * answered no. An error of any other origin, whatever its shape, may have
+   * come after the broadcast.
+   */
   public static isNodeRefusal = (error: unknown): boolean =>
-    typeof error === 'object' &&
-    error !== null &&
+    RpcClient.isNodeError(error) &&
     typeof (error as { code?: unknown }).code === 'number';
 }
 

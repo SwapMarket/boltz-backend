@@ -1,6 +1,7 @@
 import { networks } from 'liquidjs-lib';
 import Logger from '../../../../lib/Logger';
 import type { IElementsClient } from '../../../../lib/chain/ElementsClient';
+import RpcClient from '../../../../lib/chain/RpcClient';
 import ElementsWalletProvider from '../../../../lib/wallet/providers/ElementsWalletProvider';
 import NotBroadcastError from '../../../../lib/wallet/providers/NotBroadcastError';
 
@@ -16,7 +17,10 @@ describe('ElementsWalletProvider', () => {
     );
 
   test('should mark a refusal by the node as not broadcast', async () => {
-    const refusal = { code: -6, message: 'Insufficient funds' };
+    const refusal = RpcClient.markNodeError({
+      code: -6,
+      message: 'Insufficient funds',
+    });
     await expect(
       provider(jest.fn().mockRejectedValue(refusal)).sendToAddress(
         'el1q',
