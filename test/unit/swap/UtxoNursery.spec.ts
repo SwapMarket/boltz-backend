@@ -2777,6 +2777,7 @@ describe('UtxoNursery', () => {
         status: SwapUpdateEvent.TransactionConfirmed,
         lockupTransactionId: 'txid',
         lockupTransactionVout: 0,
+        onchainAmount: 100_000,
       };
       SwapRepository.getSwaps = jest.fn().mockResolvedValue([swap]);
 
@@ -2801,6 +2802,41 @@ describe('UtxoNursery', () => {
       await nursery['checkDeepenedLockups'](btcChainClient, btcWallet);
       expect(emittedSwaps).toEqual(['waiting']);
     });
+
+    test.each`
+      description           | overrides                                             | reason
+      ${'too little'}       | ${{ onchainAmount: 90_000, expectedAmount: 100_000 }} | ${Errors.INSUFFICIENT_AMOUNT(90_000, 100_000).message}
+      ${'nothing recorded'} | ${{}}                                                 | ${Errors.INCORRECT_ASSET_SENT().message}
+    `(
+      'should fail, not hand on, a deep lockup that is $description',
+      async ({ overrides, reason }) => {
+        nursery['requiredLockupConfirmations'].set('BTC', 3);
+        const swap = {
+          id: 'wanting',
+          pair: 'BTC/BTC',
+          orderSide: OrderSide.SELL,
+          status: SwapUpdateEvent.TransactionConfirmed,
+          lockupTransactionId: 'txid',
+          lockupTransactionVout: 0,
+          ...overrides,
+        };
+        SwapRepository.getSwaps = jest.fn().mockResolvedValue([swap]);
+        mockGetRawTransactionVerboseResult = () => ({
+          confirmations: 5,
+          hex: sampleTransactions.lockup,
+        });
+
+        const lockup = jest.fn();
+        const failed = jest.fn();
+        nursery.on('swap.lockup', lockup);
+        nursery.on('swap.lockup.failed', failed);
+
+        await nursery['checkDeepenedLockups'](btcChainClient, btcWallet);
+
+        expect(lockup).not.toHaveBeenCalled();
+        expect(failed).toHaveBeenCalledWith({ swap, reason });
+      },
+    );
 
     test('should forget handed on swaps once they have moved on', async () => {
       nursery['requiredLockupConfirmations'].set('BTC', 3);

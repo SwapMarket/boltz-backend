@@ -668,6 +668,28 @@ class UtxoNursery extends TypedEventEmitter<{
    * confirmations and now have them. The swaps are found by status, so this
    * also picks up swaps that were waiting when the service restarted.
    */
+  private recordedLockupFailure = (swap: Swap): string | undefined => {
+    const value = swap.onchainAmount ?? 0;
+    if (value === 0) {
+      return Errors.INCORRECT_ASSET_SENT().message;
+    }
+    if (swap.expectedAmount) {
+      if (swap.expectedAmount > value) {
+        return Errors.INSUFFICIENT_AMOUNT(value, swap.expectedAmount).message;
+      }
+      if (
+        this.overpaymentProtector.isUnacceptableOverpay(
+          swap.type,
+          swap.expectedAmount,
+          value,
+        )
+      ) {
+        return Errors.OVERPAID_AMOUNT(value, swap.expectedAmount).message;
+      }
+    }
+    return undefined;
+  };
+
   private checkDeepenedLockups = async (
     chainClient: IChainClient,
     wallet: Wallet,
@@ -712,6 +734,19 @@ class UtxoNursery extends TypedEventEmitter<{
           `Lockup ${swap.lockupTransactionId} of Swap ${swap.id} has ${tx.confirmations} confirmations`,
         );
         this.deepLockupsEmitted.add(swap.id);
+
+        // The status is written before the lockup's checks, and a failure
+        // they found is written after it: one that is not written yet, or
+        // whose write failed, must not be paid against
+        const failure = this.recordedLockupFailure(swap);
+        if (failure !== undefined) {
+          this.logger.warn(
+            `Not paying against lockup ${swap.lockupTransactionId} of Swap ${swap.id}: ${failure}`,
+          );
+          this.emit('swap.lockup.failed', { swap, reason: failure });
+          continue;
+        }
+
         this.emit('swap.lockup', {
           transaction: parseTransaction(wallet.type, tx.hex) as Transaction,
           lockupTransactionVout: swap.lockupTransactionVout!,
