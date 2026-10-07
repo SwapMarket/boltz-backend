@@ -3307,6 +3307,193 @@ describe('SwapNursery', () => {
     });
   });
 
+  describe('lockups sent without being recorded', () => {
+    const reverseSwap = {
+      id: 'unrecorded',
+      pair: 'BTC/BTC',
+      type: SwapType.ReverseSubmarine,
+      orderSide: OrderSide.BUY,
+      status: SwapUpdateEvent.SwapCreated,
+      onchainAmount: 90_000,
+      lockupAddress: 'bcrt1reverse',
+      createdAt: new Date(1_700_000_000_000),
+      nodeId: mockLndClient.id,
+    } as unknown as ReverseSwap;
+    const lockup = {
+      transactionId: 'found',
+      vout: 1,
+      fee: 141,
+      transaction: {} as any,
+    };
+
+    let findSend: jest.Mock;
+
+    beforeEach(async () => {
+      findSend = jest.fn();
+      mockWallet.findSend = findSend;
+      jest
+        .spyOn(ReverseSwapRepository, 'getReverseSwap')
+        .mockResolvedValue(reverseSwap);
+      (WrappedSwapRepository.setServerLockupTransaction as jest.Mock)
+        .mockReset()
+        .mockImplementation(async (swap, transactionId) => ({
+          ...swap,
+          transactionId,
+          status: SwapUpdateEvent.TransactionMempool,
+        }));
+      jest.spyOn(swapNursery, 'emit');
+      await swapNursery.init([mockCurrency]);
+    });
+
+    afterEach(() => {
+      delete mockWallet.findSend;
+    });
+
+    const block = async () => {
+      (swapNursery as any).utxoNursery.emit('block', {
+        symbol: 'BTC',
+        height: 1,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    };
+
+    test('should be remembered when a send may have gone out', async () => {
+      const nursery = swapNursery as any;
+      await nursery.lockupUtxo(
+        reverseSwap,
+        { estimateFee: jest.fn().mockResolvedValue(2) },
+        {
+          symbol: 'BTC',
+          findSend: jest.fn().mockResolvedValue(undefined),
+          sendToAddress: jest.fn().mockRejectedValue(new Error('hang up')),
+        },
+        SendApprovalAction.Accept,
+      );
+
+      expect(nursery.unrecordedLockups.has(reverseSwap.id)).toEqual(true);
+    });
+
+    test('should record a lockup the wallet sent, at the next block', async () => {
+      (swapNursery as any).unrecordedLockups.set(reverseSwap.id, Date.now());
+      findSend.mockResolvedValue(lockup);
+
+      await block();
+
+      expect(findSend).toHaveBeenCalledWith(
+        reverseSwap.lockupAddress,
+        new Date(
+          reverseSwap.createdAt.getTime() - SwapNursery.walletClockMarginMs,
+        ),
+      );
+      expect(
+        WrappedSwapRepository.setServerLockupTransaction,
+      ).toHaveBeenCalledWith(reverseSwap, 'found', 90_000, 141, 1);
+      expect(swapNursery.emit).toHaveBeenCalledWith(
+        'coins.sent',
+        expect.objectContaining({
+          swap: expect.objectContaining({ transactionId: 'found' }),
+        }),
+      );
+      expect((swapNursery as any).unrecordedLockups.size).toEqual(0);
+    });
+
+    test('should keep asking while the wallet cannot tell', async () => {
+      (swapNursery as any).unrecordedLockups.set(reverseSwap.id, Date.now());
+      findSend.mockRejectedValue(new Error('ECONNREFUSED'));
+
+      await block();
+
+      expect(
+        WrappedSwapRepository.setServerLockupTransaction,
+      ).not.toHaveBeenCalled();
+      expect(
+        (swapNursery as any).unrecordedLockups.has(reverseSwap.id),
+      ).toEqual(true);
+    });
+
+    test('should fail the swap only once the wallet has said for long enough that nothing went out', async () => {
+      const handleSwapSendFailed = jest
+        .spyOn(swapNursery as any, 'handleSwapSendFailed')
+        .mockResolvedValue(undefined);
+      findSend.mockResolvedValue(undefined);
+
+      (swapNursery as any).unrecordedLockups.set(reverseSwap.id, Date.now());
+      await block();
+      expect(handleSwapSendFailed).not.toHaveBeenCalled();
+
+      (swapNursery as any).unrecordedLockups.set(
+        reverseSwap.id,
+        Date.now() - SwapNursery.unsentLockupGraceMs - 1,
+      );
+      await block();
+      expect(handleSwapSendFailed).toHaveBeenCalledWith(
+        reverseSwap,
+        'BTC',
+        new Error('the lockup was not sent'),
+        mockLndClient,
+      );
+      expect((swapNursery as any).unrecordedLockups.size).toEqual(0);
+    });
+
+    test('should forget a swap that has moved on', async () => {
+      jest.spyOn(ReverseSwapRepository, 'getReverseSwap').mockResolvedValue({
+        ...reverseSwap,
+        status: SwapUpdateEvent.TransactionMempool,
+        transactionId: 'recorded',
+      } as unknown as ReverseSwap);
+      (swapNursery as any).unrecordedLockups.set(reverseSwap.id, Date.now());
+
+      await block();
+
+      expect(findSend).not.toHaveBeenCalled();
+      expect((swapNursery as any).unrecordedLockups.size).toEqual(0);
+    });
+
+    describe('at the timeout', () => {
+      test('should refund a lockup the wallet sent', async () => {
+        findSend.mockResolvedValue(lockup);
+        const refundSwap = jest
+          .spyOn(swapNursery as any, 'refundSwap')
+          .mockResolvedValue(undefined);
+
+        await (swapNursery as any).expireReverseSwap(reverseSwap);
+
+        expect(
+          WrappedSwapRepository.setServerLockupTransaction,
+        ).toHaveBeenCalled();
+        expect(refundSwap).toHaveBeenCalledWith(
+          mockCurrency,
+          expect.objectContaining({ transactionId: 'found' }),
+        );
+      });
+
+      test('should not expire the swap while the wallet cannot tell', async () => {
+        findSend.mockRejectedValue(new Error('ECONNREFUSED'));
+        (WrappedSwapRepository.setStatus as jest.Mock).mockClear();
+
+        await (swapNursery as any).expireReverseSwap(reverseSwap);
+
+        expect(WrappedSwapRepository.setStatus).not.toHaveBeenCalled();
+        expect(mockLogger.error).toHaveBeenCalledWith(
+          expect.stringContaining('Not expiring Reverse Swap unrecorded yet'),
+        );
+      });
+
+      test('should expire it as before when nothing was sent', async () => {
+        findSend.mockResolvedValue(undefined);
+        (WrappedSwapRepository.setStatus as jest.Mock).mockClear();
+
+        await (swapNursery as any).expireReverseSwap(reverseSwap);
+
+        expect(WrappedSwapRepository.setStatus).toHaveBeenCalledWith(
+          reverseSwap,
+          SwapUpdateEvent.SwapExpired,
+          expect.anything(),
+        );
+      });
+    });
+  });
+
   describe('attemptSettleSwap idempotency', () => {
     const mockPreimage = Buffer.from('preimage');
 

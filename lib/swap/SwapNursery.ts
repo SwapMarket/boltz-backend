@@ -153,6 +153,15 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
   // in case the node's clock and ours disagree
   public static readonly walletClockMarginMs = 10 * 60 * 1000;
 
+  // Reverse swaps whose lockup may have been sent without being recorded,
+  // with when that happened: asked about on every block until the wallet
+  // tells
+  private readonly unrecordedLockups = new Map<string, number>();
+
+  // A send the node had not finished when its answer was lost may still go
+  // out; only this long after can its absence from the wallet be trusted
+  public static readonly unsentLockupGraceMs = 30 * 60 * 1000;
+
   // The full three-way mapping is intentional: the two-way call sites only ever
   // pass the two types they can encounter, and this agrees with them on those
   private static readonly lockForSwapType = (type: SwapType): string =>
@@ -947,6 +956,10 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
     this.arkNursery.init(currencies);
     this.utxoNursery.bindCurrency(currencies);
     this.lightningNursery.bindCurrencies(currencies);
+
+    this.utxoNursery.on('block', async () => {
+      await this.recordUnrecordedLockups();
+    });
 
     await this.invoiceNursery.init();
 
@@ -2091,6 +2104,9 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
       // Only a refusal by the node, or an error before the send, means
       // nothing went out
       if (sendAttempted && !(error instanceof NotBroadcastError)) {
+        if (swap.type === SwapType.ReverseSubmarine) {
+          this.unrecordedLockups.set(swap.id, Date.now());
+        }
         await this.lockupMayBeOnChain(
           swap,
           error,
@@ -2733,6 +2749,23 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
 
     const chainCurrency = this.currencies.get(chainSymbol)!;
 
+    // A lockup may be on chain without being recorded (an error after it
+    // was sent); expiring the swap then would leave it unrefunded
+    if (!queriedReverseSwap!.transactionId) {
+      let found: SentTransaction | undefined;
+      try {
+        found = await this.findUnrecordedLockup(queriedReverseSwap!);
+      } catch (error) {
+        this.logger.error(
+          `Not expiring Reverse Swap ${reverseSwap.id} yet: could not check whether the ${chainSymbol} wallet sent its lockup: ${formatError(error)}`,
+        );
+        return;
+      }
+      if (found !== undefined) {
+        reverseSwap = await this.recordLockup(queriedReverseSwap!, found);
+      }
+    }
+
     try {
       if (reverseSwap.transactionId) {
         await this.refundSwap(chainCurrency, reverseSwap);
@@ -2748,6 +2781,121 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
       }
     } catch (e) {
       await this.handleFailedRefund(reverseSwap, e);
+    }
+  };
+
+  /**
+   * The wallet's lockup of a reverse swap the database has none for; throws
+   * when the wallet cannot tell
+   */
+  private findUnrecordedLockup = async (
+    reverseSwap: ReverseSwap,
+  ): Promise<SentTransaction | undefined> => {
+    const { base, quote } = splitPairId(reverseSwap.pair);
+    const wallet = this.walletManager.wallets.get(
+      getChainCurrency(base, quote, reverseSwap.orderSide, true),
+    );
+    if (wallet === undefined) {
+      return undefined;
+    }
+
+    return await wallet.findSend(
+      reverseSwap.lockupAddress,
+      new Date(
+        this.swapCreatedAt(reverseSwap).getTime() -
+          SwapNursery.walletClockMarginMs,
+      ),
+    );
+  };
+
+  private recordLockup = async (
+    reverseSwap: ReverseSwap,
+    lockup: SentTransaction,
+  ): Promise<ReverseSwap> => {
+    this.logger.warn(
+      `Recording lockup ${lockup.transactionId} of Reverse Swap ${reverseSwap.id}, which the wallet sent without it being recorded`,
+    );
+    const updated = (await WrappedSwapRepository.setServerLockupTransaction(
+      reverseSwap,
+      lockup.transactionId,
+      this.lockupAmount(reverseSwap),
+      lockup.fee!,
+      lockup.vout!,
+    )) as ReverseSwap;
+    this.emit('coins.sent', {
+      transaction: lockup.transaction!,
+      swap: updated,
+    });
+    return updated;
+  };
+
+  /**
+   * Settles what the reverse swaps whose lockup may have been sent without
+   * being recorded turned out to be: a lockup the wallet sent is recorded, so
+   * that the user's claim is seen and the invoice settled, or refunded at the
+   * timeout; one the wallet never sent fails the swap, which returns the
+   * user's Lightning payment.
+   */
+  private recordUnrecordedLockups = async () => {
+    for (const [id, since] of Array.from(this.unrecordedLockups)) {
+      await this.lock.acquire(
+        SwapNursery.reverseSwapLock,
+        'recordUnrecordedLockups',
+        async () => {
+          const reverseSwap = await ReverseSwapRepository.getReverseSwap({
+            id,
+          });
+          if (
+            reverseSwap === null ||
+            reverseSwap === undefined ||
+            reverseSwap.transactionId ||
+            ![
+              SwapUpdateEvent.SwapCreated,
+              SwapUpdateEvent.MinerFeePaid,
+            ].includes(reverseSwap.status as SwapUpdateEvent)
+          ) {
+            this.unrecordedLockups.delete(id);
+            return;
+          }
+
+          let found: SentTransaction | undefined;
+          try {
+            found = await this.findUnrecordedLockup(reverseSwap);
+          } catch (error) {
+            this.logger.warn(
+              `Could not yet check whether the lockup of Reverse Swap ${id} was sent: ${formatError(error)}`,
+            );
+            return;
+          }
+
+          if (found !== undefined) {
+            await this.recordLockup(reverseSwap, found);
+          } else if (Date.now() - since < SwapNursery.unsentLockupGraceMs) {
+            return;
+          } else {
+            const { base, quote } = splitPairId(reverseSwap.pair);
+            const lightningCurrency = this.currencies.get(
+              getLightningCurrency(base, quote, reverseSwap.orderSide, true),
+            );
+            const resolved =
+              lightningCurrency === undefined
+                ? undefined
+                : NodeSwitch.tryResolveReverseSwapNode(
+                    lightningCurrency,
+                    reverseSwap,
+                  );
+            await this.handleSwapSendFailed(
+              reverseSwap,
+              getChainCurrency(base, quote, reverseSwap.orderSide, true),
+              new Error('the lockup was not sent'),
+              resolved?.status === ReverseSwapNodeResolutionStatus.Resolved
+                ? resolved.lightningClient
+                : undefined,
+            );
+          }
+          this.unrecordedLockups.delete(id);
+        },
+      );
     }
   };
 
