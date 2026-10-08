@@ -264,10 +264,12 @@ describe('Wallet', () => {
       sentTransaction,
     );
     expect(findSend).toHaveBeenCalledWith(address, since);
+    expect(withFindSend.canFindSend).toEqual(true);
   });
 
   test('should find no send with a provider that cannot look', async () => {
     await expect(wallet.findSend(address, new Date())).resolves.toBeUndefined();
+    expect(wallet.canFindSend).toEqual(false);
   });
 
   test('should sweep wallet', async () => {

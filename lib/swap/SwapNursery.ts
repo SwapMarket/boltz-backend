@@ -2104,7 +2104,10 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
       // Only a refusal by the node, or an error before the send, means
       // nothing went out
       if (sendAttempted && !(error instanceof NotBroadcastError)) {
-        if (swap.type === SwapType.ReverseSubmarine) {
+        // Only a wallet that can tell what it sent can say the lockup did
+        // not go out; with any other, the swap stays as it is, for the
+        // operator
+        if (swap.type === SwapType.ReverseSubmarine && wallet.canFindSend) {
           this.unrecordedLockups.set(swap.id, Date.now());
         }
         await this.lockupMayBeOnChain(
@@ -2858,6 +2861,15 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
             return;
           }
 
+          const { base, quote } = splitPairId(reverseSwap.pair);
+          const wallet = this.walletManager.wallets.get(
+            getChainCurrency(base, quote, reverseSwap.orderSide, true),
+          );
+          if (wallet === undefined || !wallet.canFindSend) {
+            this.unrecordedLockups.delete(id);
+            return;
+          }
+
           let found: SentTransaction | undefined;
           try {
             found = await this.findUnrecordedLockup(reverseSwap);
@@ -2873,7 +2885,6 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
           } else if (Date.now() - since < SwapNursery.unsentLockupGraceMs) {
             return;
           } else {
-            const { base, quote } = splitPairId(reverseSwap.pair);
             const lightningCurrency = this.currencies.get(
               getLightningCurrency(base, quote, reverseSwap.orderSide, true),
             );
