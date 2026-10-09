@@ -98,52 +98,33 @@ class MusigSigner {
     rawTransaction: Buffer,
     index: number,
   ): Promise<PartialSignature> => {
-    const swap = await SwapRepository.getSwap({ id: swapId });
-    if (!swap) {
-      throw Errors.SWAP_NOT_FOUND(swapId);
-    }
+    const { swap, currency } = await this.reserveRefund(swapId, (swap) => {
+      const { base, quote } = splitPairId(swap.pair);
+      const currency = this.currencies.get(
+        getChainCurrency(base, quote, swap.orderSide, false),
+      )!;
 
-    if (
-      this.signerControlRegistry.isDisabled(
-        Signer.SIGNER_SUBMARINE_REFUND_COOPERATIVE,
-      )
-    ) {
-      throw Errors.NOT_ELIGIBLE_FOR_COOPERATIVE_REFUND(
-        cooperativeSignaturesDisabledMessage,
-      );
-    }
+      if (currency.chainClient === undefined) {
+        throw Errors.CURRENCY_NOT_UTXO_BASED();
+      }
 
-    const { base, quote } = splitPairId(swap.pair);
-    const currency = this.currencies.get(
-      getChainCurrency(base, quote, swap.orderSide, false),
-    )!;
-
-    if (currency.chainClient === undefined) {
-      throw Errors.CURRENCY_NOT_UTXO_BASED();
-    }
-
-    await this.validateEligibility(swap);
+      return currency;
+    });
 
     this.logger.debug(
       `Creating partial signature for refund of Swap ${swap.id}`,
     );
 
-    const swapTree = SwapTreeSerializer.deserializeSwapTree(swap.redeemScript!);
-
-    const sig = await createPartialSignature(
+    return createPartialSignature(
       currency,
       this.walletManager.wallets.get(currency.symbol)!,
-      swapTree,
+      SwapTreeSerializer.deserializeSwapTree(swap.redeemScript!),
       swap.keyIndex!,
       getHexBuffer(swap.refundPublicKey!),
       theirNonce,
       rawTransaction,
       index,
     );
-
-    await SwapRepository.setRefundSignatureCreated(swap.id);
-
-    return sig;
   };
 
   public signRefundArk = async (
@@ -151,49 +132,38 @@ class MusigSigner {
     transaction: string,
     checkpoint: string,
   ): Promise<{ transaction: string; checkpoint: string }> => {
-    const swap = await SwapRepository.getSwap({ id: swapId });
-    if (!swap) {
-      throw Errors.SWAP_NOT_FOUND(swapId);
-    }
+    const { swap, currency } = await this.reserveRefund(
+      swapId,
+      (swap) => {
+        const currency = this.currencies.get(swap.chainCurrency);
+        if (
+          currency === undefined ||
+          currency.type !== CurrencyType.Ark ||
+          currency.arkNode === undefined
+        ) {
+          throw new Error(
+            `currency is not ${currencyTypeToString(CurrencyType.Ark)}`,
+          );
+        }
 
-    if (
-      this.signerControlRegistry.isDisabled(
-        Signer.SIGNER_SUBMARINE_REFUND_COOPERATIVE,
-      )
-    ) {
-      throw Errors.NOT_ELIGIBLE_FOR_COOPERATIVE_REFUND(
-        cooperativeSignaturesDisabledMessage,
-      );
-    }
-
-    const currency = this.currencies.get(swap.chainCurrency);
-    if (
-      currency === undefined ||
-      currency.type !== CurrencyType.Ark ||
-      currency.arkNode === undefined
-    ) {
-      throw new Error(
-        `currency is not ${currencyTypeToString(CurrencyType.Ark)}`,
-      );
-    }
-
-    await this.validateEligibility(swap);
-    checkArkTransaction(
-      transaction,
-      checkpoint,
-      swap.lockupTransactionId,
-      swap.lockupTransactionVout,
+        return currency;
+      },
+      (swap) =>
+        checkArkTransaction(
+          transaction,
+          checkpoint,
+          swap.lockupTransactionId,
+          swap.lockupTransactionVout,
+        ),
     );
 
     this.logger.debug(
       `Creating partial signature for refund of ARK Swap ${swap.id}`,
     );
 
-    await SwapRepository.setRefundSignatureCreated(swap.id);
-
     const [transactionSigned, checkpointSigned] = await Promise.all([
-      currency.arkNode.signTransaction(transaction),
-      currency.arkNode.signTransaction(checkpoint),
+      currency.arkNode!.signTransaction(transaction),
+      currency.arkNode!.signTransaction(checkpoint),
     ]);
 
     return {
@@ -352,6 +322,43 @@ class MusigSigner {
 
     return undefined;
   };
+
+  // The refund signature is recorded under the nursery's swap lock before
+  // anything is signed, so an invoice can never be paid while its swap's refund
+  // is being signed
+  private reserveRefund = (
+    swapId: string,
+    resolveCurrency: (swap: Swap) => Currency,
+    checkTransaction?: (swap: Swap) => void,
+  ): Promise<{ swap: Swap; currency: Currency }> =>
+    this.nursery.lock.acquire(
+      SwapNursery.swapLock,
+      'reserveRefund',
+      async () => {
+        const swap = await SwapRepository.getSwap({ id: swapId });
+        if (!swap) {
+          throw Errors.SWAP_NOT_FOUND(swapId);
+        }
+
+        if (
+          this.signerControlRegistry.isDisabled(
+            Signer.SIGNER_SUBMARINE_REFUND_COOPERATIVE,
+          )
+        ) {
+          throw Errors.NOT_ELIGIBLE_FOR_COOPERATIVE_REFUND(
+            cooperativeSignaturesDisabledMessage,
+          );
+        }
+
+        const currency = resolveCurrency(swap);
+        await this.validateEligibility(swap);
+        checkTransaction?.(swap);
+
+        await SwapRepository.setRefundSignatureCreated(swap.id);
+
+        return { swap, currency };
+      },
+    );
 
   private validateEligibility = async (swap: Swap) => {
     const { base, quote } = splitPairId(swap.pair);

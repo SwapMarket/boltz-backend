@@ -43,7 +43,11 @@ describe('SwapNursery', () => {
     {} as any,
     0,
     claimer,
-    { on: jest.fn(), setAttemptSettle: jest.fn() } as any,
+    {
+      on: jest.fn(),
+      setAttemptSettle: jest.fn(),
+      setLockupLock: jest.fn(),
+    } as any,
     {} as any,
     {} as any,
   );

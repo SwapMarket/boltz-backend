@@ -22,7 +22,7 @@ import SignerControlRegistry from '../../../../lib/service/SignerControlRegistry
 import MusigSigner, {
   RefundRejectionReason,
 } from '../../../../lib/service/cooperative/MusigSigner';
-import type SwapNursery from '../../../../lib/swap/SwapNursery';
+import SwapNursery from '../../../../lib/swap/SwapNursery';
 import type WalletManager from '../../../../lib/wallet/WalletManager';
 import type { Currency } from '../../../../lib/wallet/WalletManager';
 
@@ -49,11 +49,17 @@ describe('MusigSigner', () => {
   ]);
   const signerControlRegistry = SignerControlRegistry.getInstance();
 
+  const refundNursery = {
+    lock: {
+      acquire: jest.fn(async (_lock, _op, callback) => callback()),
+    },
+  };
+
   const signer = new MusigSigner(
     Logger.disabledLogger,
     currencies,
     {} as unknown as WalletManager,
-    {} as unknown as SwapNursery,
+    refundNursery as unknown as SwapNursery,
   );
 
   beforeEach(() => {
@@ -597,6 +603,22 @@ describe('MusigSigner', () => {
         'base64',
       );
 
+      let heldLock: string | undefined;
+      refundNursery.lock.acquire.mockImplementationOnce(
+        async (lock, _op, callback) => {
+          heldLock = lock;
+          try {
+            return await callback();
+          } finally {
+            heldLock = undefined;
+          }
+        },
+      );
+      let lockWhenRecorded: string | undefined;
+      SwapRepository.setRefundSignatureCreated = jest.fn(async () => {
+        lockWhenRecorded = heldLock;
+      }) as any;
+
       await expect(
         signer.signRefundArk(swapId, inputRefundTx, inputCheckpoint),
       ).resolves.toEqual({
@@ -607,6 +629,16 @@ describe('MusigSigner', () => {
       expect(SwapRepository.setRefundSignatureCreated).toHaveBeenCalledTimes(1);
       expect(SwapRepository.setRefundSignatureCreated).toHaveBeenCalledWith(
         swapId,
+      );
+      expect(lockWhenRecorded).toEqual(SwapNursery.swapLock);
+      expect(
+        (SwapRepository.setRefundSignatureCreated as jest.Mock).mock
+          .invocationCallOrder[0],
+      ).toBeLessThan(
+        Math.min(
+          ...(arkCurrency.arkNode!.signTransaction as jest.Mock).mock
+            .invocationCallOrder,
+        ),
       );
 
       expect(arkCurrency.arkNode!.signTransaction).toHaveBeenCalledTimes(2);
