@@ -760,7 +760,12 @@ class SwapManager {
         // invoice expired.
         if (
           updatedSwap.lockupTransactionId &&
-          statusBeforeUpdate === SwapUpdateEvent.TransactionConfirmed
+          statusBeforeUpdate === SwapUpdateEvent.TransactionConfirmed &&
+          (receivingCurrency.chainClient === undefined ||
+            (await this.nursery.utxoNursery.lockupIsDeepEnough(
+              receivingCurrency.chainClient,
+              updatedSwap,
+            )))
         ) {
           try {
             await this.nursery.settleConfirmedLockup(
