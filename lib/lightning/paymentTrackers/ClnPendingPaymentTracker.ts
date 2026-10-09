@@ -95,7 +95,10 @@ class ClnPendingPaymentTracker extends NodePendingPaymentTracker {
         return { kind: PaymentStatusKind.Pending };
       }
 
-      const res = await (client as ClnClient).checkListPaysStatus(decoded, pays);
+      const res = await (client as ClnClient).checkListPaysStatus(
+        decoded,
+        pays,
+      );
       if (res !== undefined) {
         return { kind: PaymentStatusKind.Succeeded, response: res };
       }
@@ -105,7 +108,10 @@ class ClnPendingPaymentTracker extends NodePendingPaymentTracker {
       if (e === ClnClient.paymentPendingError) {
         return { kind: PaymentStatusKind.Pending };
       }
-      if (e === ClnClient.paymentAllAttemptsFailed || this.isPermanentError(e)) {
+      if (
+        e === ClnClient.paymentAllAttemptsFailed ||
+        this.isPermanentError(e)
+      ) {
         return { kind: PaymentStatusKind.Failed };
       }
       // Inconclusive lookup: never assume the payment is dead.

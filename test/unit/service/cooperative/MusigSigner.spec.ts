@@ -622,12 +622,9 @@ describe('MusigSigner', () => {
   });
 
   describe('hasPendingOrSuccessfulLightningPayment', () => {
-    const hasPendingOrSuccessfulLightningPayment = (
-      MusigSigner as any
-    )['hasPendingOrSuccessfulLightningPayment'] as (
-      currency: any,
-      swap: any,
-    ) => Promise<boolean>;
+    const hasPendingOrSuccessfulLightningPayment = (MusigSigner as any)[
+      'hasPendingOrSuccessfulLightningPayment'
+    ] as (currency: any, swap: any) => Promise<boolean>;
 
     const swap = {
       type: SwapType.Submarine,

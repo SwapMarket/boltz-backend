@@ -1,5 +1,5 @@
-import Logger from '../../../lib/Logger';
 import type { ChainConfig } from '../../../lib/Config';
+import Logger from '../../../lib/Logger';
 import ElementsClient from '../../../lib/chain/ElementsClient';
 import type Sidecar from '../../../lib/sidecar/Sidecar';
 
