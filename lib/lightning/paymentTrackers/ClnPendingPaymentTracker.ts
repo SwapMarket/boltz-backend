@@ -12,11 +12,14 @@ import NodePendingPaymentTracker, {
 class ClnPendingPaymentTracker extends NodePendingPaymentTracker {
   private static readonly checkInterval = 15;
 
+  // Consecutive empty listPays results before a payment counts as never attempted
+  public static readonly maxEmptyListPaysChecks = 4;
+
   private readonly checkInterval: NodeJS.Timer;
 
   private readonly paymentsToWatch = new Map<
     string,
-    { invoice: string; client: ClnClient }
+    { invoice: string; client: ClnClient; emptyChecks: number }
   >();
 
   constructor(logger: Logger) {
@@ -61,9 +64,15 @@ class ClnPendingPaymentTracker extends NodePendingPaymentTracker {
     invoice: string,
     preimageHash: string,
   ) => {
+    // Keep the empty listPays count so re-watching cannot extend the grace period
+    if (this.paymentsToWatch.get(preimageHash)?.client.id === client.id) {
+      return;
+    }
+
     this.paymentsToWatch.set(preimageHash, {
       invoice,
       client: client as ClnClient,
+      emptyChecks: 0,
     });
   };
 
@@ -88,11 +97,12 @@ class ClnPendingPaymentTracker extends NodePendingPaymentTracker {
     try {
       const { decoded, pays } = await (client as ClnClient).listPays(invoice);
 
-      // No persisted attempt yet does not mean the payment failed: an xpay in
-      // flight may not have recorded a sendpay attempt. Treat it as pending so
-      // no second payment is dispatched.
+      // An xpay in flight may not have recorded a sendpay attempt yet, so no
+      // attempt is only conclusive once the watch's grace period has ended
       if (pays.length === 0) {
-        return { kind: PaymentStatusKind.Pending };
+        return this.paymentsToWatch.get(preimageHash)?.client.id === client.id
+          ? { kind: PaymentStatusKind.Pending }
+          : { kind: PaymentStatusKind.Failed };
       }
 
       const res = await (client as ClnClient).checkListPaysStatus(
@@ -123,12 +133,10 @@ class ClnPendingPaymentTracker extends NodePendingPaymentTracker {
   };
 
   private checkPendingPayments = async () => {
-    for (const [
-      preimageHash,
-      { client, invoice },
-    ] of this.paymentsToWatch.entries()) {
+    for (const [preimageHash, watched] of this.paymentsToWatch.entries()) {
+      const { client, invoice } = watched;
       // Only stop watching a payment once we have a definitive answer from the
-      // node (it succeeded or terminally failed). A failed/empty status lookup
+      // node (it succeeded or terminally failed). A failed status lookup
       // is inconclusive and must never be turned into a failure, otherwise a
       // transient boltz<->CLN RPC fault would let us abandon a still-live
       // payment and release the swap's refund (double spend).
@@ -138,12 +146,23 @@ class ClnPendingPaymentTracker extends NodePendingPaymentTracker {
         const { decoded, pays } = await client.listPays(invoice);
 
         if (pays.length === 0) {
-          // An empty listPays result does not imply the payment failed: an xpay
-          // that has not (yet) persisted a sendpay attempt leaves no entry while
-          // the payment is still in flight. Keep watching.
-          this.logger.silly(
-            `No CLN pay attempts recorded yet for payment ${preimageHash}; keeping watch`,
-          );
+          // An xpay in flight may not have persisted a sendpay attempt yet, so
+          // only a run of empty results means no attempt was made
+          watched.emptyChecks += 1;
+          if (
+            watched.emptyChecks >=
+            ClnPendingPaymentTracker.maxEmptyListPaysChecks
+          ) {
+            resolved = await this.handleFailedPayment(
+              client,
+              preimageHash,
+              'no attempts have been made',
+            );
+          } else {
+            this.logger.silly(
+              `No CLN pay attempts recorded yet for payment ${preimageHash}; keeping watch`,
+            );
+          }
         } else {
           const res = await client.checkListPaysStatus(decoded, pays);
           if (res !== undefined) {

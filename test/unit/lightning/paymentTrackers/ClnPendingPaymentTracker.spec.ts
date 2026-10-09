@@ -6,6 +6,7 @@ import LightningPaymentRepository from '../../../../lib/db/repositories/Lightnin
 import type ClnClient from '../../../../lib/lightning/cln/ClnClient';
 import ClnClientDefault from '../../../../lib/lightning/cln/ClnClient';
 import ClnPendingPaymentTracker from '../../../../lib/lightning/paymentTrackers/ClnPendingPaymentTracker';
+import { PaymentStatusKind } from '../../../../lib/lightning/paymentTrackers/NodePendingPaymentTracker';
 
 describe('ClnPendingPaymentTracker', () => {
   const preimageHash = getHexString(randomBytes(32));
@@ -141,5 +142,67 @@ describe('ClnPendingPaymentTracker', () => {
       LightningPaymentStatus.Success,
     );
     expect(watched().has(preimageHash)).toEqual(false);
+  });
+
+  describe('empty listPays results', () => {
+    beforeEach(() => {
+      (client.listPays as jest.Mock).mockResolvedValue({
+        decoded: {},
+        pays: [],
+      });
+    });
+
+    test('should fail the payment after the grace period of empty results', async () => {
+      for (
+        let i = 1;
+        i < ClnPendingPaymentTracker.maxEmptyListPaysChecks;
+        i++
+      ) {
+        await checkPendingPayments();
+      }
+      expect(LightningPaymentRepository.setStatus).not.toHaveBeenCalled();
+      expect(watched().has(preimageHash)).toEqual(true);
+
+      await checkPendingPayments();
+
+      expect(LightningPaymentRepository.setStatus).toHaveBeenCalledTimes(1);
+      expect(LightningPaymentRepository.setStatus).toHaveBeenCalledWith(
+        preimageHash,
+        client.id,
+        LightningPaymentStatus.TemporaryFailure,
+        undefined,
+      );
+      expect(watched().has(preimageHash)).toEqual(false);
+    });
+
+    test('should not restart the grace period when watched again', async () => {
+      for (
+        let i = 1;
+        i < ClnPendingPaymentTracker.maxEmptyListPaysChecks;
+        i++
+      ) {
+        await checkPendingPayments();
+      }
+
+      tracker.watchPayment(client, invoice, preimageHash);
+      await checkPendingPayments();
+
+      expect(LightningPaymentRepository.setStatus).toHaveBeenCalledTimes(1);
+      expect(watched().has(preimageHash)).toEqual(false);
+    });
+
+    test('should report pending while the payment is still watched', async () => {
+      await expect(
+        tracker.checkPaymentStatus(client, invoice, preimageHash),
+      ).resolves.toEqual({ kind: PaymentStatusKind.Pending });
+    });
+
+    test('should report failed once the payment is no longer watched', async () => {
+      watched().delete(preimageHash);
+
+      await expect(
+        tracker.checkPaymentStatus(client, invoice, preimageHash),
+      ).resolves.toEqual({ kind: PaymentStatusKind.Failed });
+    });
   });
 });
