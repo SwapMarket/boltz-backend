@@ -9,6 +9,7 @@ import type TypedEventEmitter from '../consts/TypedEventEmitter';
 import type {
   AddressInfo,
   Block,
+  BlockHeader,
   BlockVerbose,
   BlockchainInfo,
   MempoolAcceptResult,
@@ -44,6 +45,7 @@ interface IChainClient extends TypedEventEmitter<ChainClientEvents> {
   getNetworkInfo(): Promise<NetworkInfo>;
 
   getBlock(hash: string): Promise<Block>;
+  getBlockHeader(hash: string): Promise<BlockHeader>;
   getBlockhash(height: number): Promise<string>;
 
   sendRawTransaction(transactionHex: string): Promise<string>;
@@ -114,6 +116,11 @@ class ChainClient extends BaseClient implements IChainClient {
 
   public getBlock = (hash: string): Promise<Block> => {
     return this.client.request<Block>('getblock', [hash]);
+  };
+
+  /** Answered from the block index, so it works for pruned blocks too. */
+  public getBlockHeader = (hash: string): Promise<BlockHeader> => {
+    return this.client.request<BlockHeader>('getblockheader', [hash, true]);
   };
 
   public getBlockVerbose = (hash: string): Promise<BlockVerbose> => {
