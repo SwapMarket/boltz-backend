@@ -257,7 +257,7 @@ class WalletManager {
 
     const mnemonic = fs.readFileSync(filename, 'utf-8').trim();
     if (!validateMnemonic(mnemonic, wordlist)) {
-      throw Errors.INVALID_MNEMONIC(mnemonic);
+      throw Errors.INVALID_MNEMONIC(filename);
     }
 
     return mnemonic;

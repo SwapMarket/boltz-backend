@@ -57,8 +57,48 @@ delete argv.version;
 delete argv.help;
 delete argv.$0;
 
-const boltz = new Boltz(argv);
+// Defense in depth: never let an uncaught startup error print a raw thrown
+// value or stack trace (which historically embedded the wallet mnemonic) to
+// stderr/journald/container logs. Emit only a controlled, redacted reason.
+const redactStartupError = (error) => {
+  if (typeof error === 'string') {
+    return error;
+  }
+
+  if (error !== null && typeof error === 'object') {
+    const parts = [];
+    if (typeof error.message === 'string') {
+      parts.push(error.message);
+    }
+    if (error.code !== undefined && error.code !== null) {
+      parts.push(`(code ${error.code})`);
+    }
+    if (parts.length > 0) {
+      return parts.join(' ');
+    }
+  }
+
+  return 'unknown error';
+};
+
+const failStartup = (error) => {
+  console.error(`Could not start boltzd: ${redactStartupError(error)}`);
+  process.exit(1);
+};
 
 (async () => {
-  await boltz.start();
+  let boltz;
+
+  try {
+    boltz = new Boltz(argv);
+  } catch (error) {
+    failStartup(error);
+    return;
+  }
+
+  try {
+    await boltz.start();
+  } catch (error) {
+    failStartup(error);
+  }
 })();

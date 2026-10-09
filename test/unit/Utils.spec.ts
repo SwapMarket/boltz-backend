@@ -47,7 +47,7 @@ describe('Utils', () => {
 
   test.each`
     version                | expectedLength
-    ${SwapVersion.Legacy}  | ${6}
+    ${SwapVersion.Legacy}  | ${12}
     ${SwapVersion.Taproot} | ${12}
   `(
     'should generate swap id for version $version',

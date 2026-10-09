@@ -2,7 +2,7 @@ import { SwapTreeSerializer } from 'boltz-core';
 import { Op } from 'sequelize';
 import InstrumentedLock from '../../InstrumentedLock';
 import type Logger from '../../Logger';
-import { formatError, getHexBuffer, getHexString } from '../../Utils';
+import { formatError, getHexBuffer } from '../../Utils';
 import {
   CurrencyType,
   SwapUpdateEvent,
@@ -310,7 +310,7 @@ class ChainSwapSigner extends CoopSignerBase<{ claim: ChainSwapInfo }> {
           }
 
           this.logger.debug(
-            `Got preimage for ${swapTypeToPrettyString(swap.type)} Swap ${swap.id}: ${getHexString(preimage)}`,
+            `Got preimage for ${swapTypeToPrettyString(swap.type)} Swap ${swap.id}`,
           );
           // TODO: broadcast the claim eventually when the preimage is correct but the signature is not?
           swap = await WrappedSwapRepository.setPreimage(swap, preimage);

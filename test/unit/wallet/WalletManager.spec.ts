@@ -301,6 +301,6 @@ describe('WalletManager', () => {
           [],
           [],
         ),
-    ).toThrow(WalletErrors.INVALID_MNEMONIC(invalidMnemonic).message);
+    ).toThrow(WalletErrors.INVALID_MNEMONIC(mnemonicPath).message);
   });
 });

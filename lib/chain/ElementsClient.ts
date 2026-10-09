@@ -77,18 +77,36 @@ class ElementsClient extends ChainClient implements IElementsClient {
       [id],
       true,
     );
-    if (res.fee && typeof res.fee === 'object' && 'bitcoin' in res.fee) {
-      res.fee = (res.fee as { bitcoin: number }).bitcoin;
+    if (res.fee && typeof res.fee === 'object') {
+      res.fee = ElementsClient.extractBitcoinAmount('fee', res.fee);
     }
-    if (
-      res.amount &&
-      typeof res.amount === 'object' &&
-      'bitcoin' in res.amount
-    ) {
-      res.amount = (res.amount as { bitcoin: number }).bitcoin;
+    if (res.amount && typeof res.amount === 'object') {
+      res.amount = ElementsClient.extractBitcoinAmount('amount', res.amount);
     }
 
     return res;
+  };
+
+  /**
+   * Elements returns confidential amounts as a per-asset object. Only the L-BTC
+   * ("bitcoin") entry is relevant here. Fail loudly on any other shape instead
+   * of leaving an object in a numeric field, which would silently turn
+   * downstream fee/amount arithmetic into NaN and misaccount funds.
+   */
+  private static extractBitcoinAmount = (
+    field: string,
+    value: object,
+  ): number => {
+    if ('bitcoin' in value) {
+      const bitcoin = (value as { bitcoin: unknown }).bitcoin;
+      if (typeof bitcoin === 'number') {
+        return bitcoin;
+      }
+    }
+
+    throw new Error(
+      `unexpected ${field} structure in Elements wallet transaction`,
+    );
   };
 
   public override sendToAddress = (

@@ -121,8 +121,12 @@ enum Commands {
         rpc_url: String,
         #[arg(short, long, default_value = "~/.boltz")]
         seed_folder: PathBuf,
-        #[arg(short, long, value_parser = parsers::parse_hex_fixed_bytes)]
-        private_key: Option<alloy::primitives::FixedBytes<32>>,
+        /// Path to a file containing the hex-encoded EVM private key. Prefer this
+        /// over passing the raw key on the command line, which would expose it to
+        /// other local users via the process list (ps, /proc/<pid>/cmdline) and
+        /// shell history.
+        #[arg(short, long)]
+        private_key_file: Option<PathBuf>,
     },
     #[command(about = "ARK commands")]
     Ark {
@@ -606,14 +610,15 @@ async fn run_command(cli: Cli) -> Result<()> {
             contract,
             rpc_url,
             seed_folder,
-            private_key,
+            private_key_file,
             ref command,
         } => {
-            // Specified private key takes precedence over seed folder
-            let keys = if let Some(private_key) = private_key {
-                evm::Keys::PrivateKey(private_key)
-            } else {
-                evm::Keys::SeedPath(seed_folder)
+            // A private key read from a file takes precedence over the seed
+            // folder. Reading it from a file keeps it out of the process list
+            // and shell history.
+            let keys = match private_key_file {
+                Some(path) => evm::Keys::PrivateKey(read_private_key_file(path)?),
+                None => evm::Keys::SeedPath(seed_folder),
             };
 
             match command {
@@ -1292,6 +1297,16 @@ fn resolve_jwt(cli: &Cli) -> Result<Option<String>> {
 fn print_pretty<T: Serialize>(value: &T) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+fn read_private_key_file(path: PathBuf) -> Result<alloy::primitives::FixedBytes<32>> {
+    let path = utils::resolve_home(path)?;
+    let contents = fs::read_to_string(&path)
+        .with_context(|| format!("could not read private key file {}", path.display()))?;
+    let bytes = alloy::hex::decode(contents.trim())
+        .map_err(|e| anyhow::anyhow!("invalid private key hex: {}", e))?;
+    alloy::primitives::FixedBytes::<32>::try_from(bytes.as_slice())
+        .map_err(|e| anyhow::anyhow!("invalid private key: {}", e))
 }
 
 fn print_signature(signature: &alloy::signers::Signature, split_vrs: bool) -> Result<()> {
