@@ -221,6 +221,17 @@ class UtxoNursery extends TypedEventEmitter<{
       return;
     }
 
+    // As for submarine swaps: our claim of a coinbase lockup would be invalid
+    // until it matures, while the user's refund needs only the timeout.
+    if (TxView.of(transaction).isCoinbase()) {
+      this.emit('chainSwap.lockup.failed', {
+        swap,
+        reason: Errors.COINBASE_LOCKUP().message,
+      });
+
+      return;
+    }
+
     if (swap.receivingData.expectedAmount > outputValue || outputValue === 0) {
       let reason: string;
 
@@ -938,6 +949,19 @@ class UtxoNursery extends TypedEventEmitter<{
       this.emit('swap.lockup.failed', {
         swap: updatedSwap,
         reason: Errors.INCORRECT_ASSET_SENT().message,
+      });
+
+      return;
+    }
+
+    // A coinbase cannot be spent before it matures, and nodes may refuse to
+    // relay a spend of one for longer than consensus requires. Paying
+    // against it could leave the claim invalid when the swap times out,
+    // while a miner can mine its own refund: refuse it.
+    if (TxView.of(transaction).isCoinbase()) {
+      this.emit('swap.lockup.failed', {
+        swap: updatedSwap,
+        reason: Errors.COINBASE_LOCKUP().message,
       });
 
       return;

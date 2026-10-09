@@ -147,4 +147,8 @@ export default {
     message: `lockup ${transactionId}:${vout} cannot be claimed`,
     code: concatErrorCode(ErrorCodePrefix.Swap, 32),
   }),
+  COINBASE_LOCKUP: (): Error => ({
+    message: 'coinbase transactions are not accepted as lockups',
+    code: concatErrorCode(ErrorCodePrefix.Swap, 33),
+  }),
 };
