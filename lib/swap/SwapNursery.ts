@@ -256,6 +256,9 @@ class SwapNursery extends TypedEventEmitter<SwapNurseryEvents> {
     });
 
     this.chainSwapSigner.setAttemptSettle(this.attemptSettleSwap);
+    this.chainSwapSigner.setLockupLock((op, cb) =>
+      this.lock.acquire(SwapNursery.chainSwapLock, op, cb),
+    );
     this.chainSwapSigner.on('claim', (swap) => {
       this.emit('claim', {
         swap,

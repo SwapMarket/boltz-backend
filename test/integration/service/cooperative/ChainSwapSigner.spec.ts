@@ -142,6 +142,7 @@ describe('ChainSwapSigner', () => {
       walletManager,
       new SwapOutputType(OutputType.Bech32),
     );
+    signer.setLockupLock((_op, cb) => cb());
   });
 
   afterAll(() => {
@@ -453,6 +454,7 @@ describe('ChainSwapSigner', () => {
         walletManager,
         new SwapOutputType(OutputType.Bech32),
       );
+      signerWithArk.setLockupLock((_op, cb) => cb());
     });
 
     test.each([[null], [undefined]])(
@@ -602,6 +604,20 @@ describe('ChainSwapSigner', () => {
       const inputRefundTx = 'transaction';
       const inputCheckpoint = 'checkpoint';
 
+      let lockupLockHeld = false;
+      signerWithArk.setLockupLock(async (_op, cb) => {
+        lockupLockHeld = true;
+        try {
+          return await cb();
+        } finally {
+          lockupLockHeld = false;
+        }
+      });
+      let recordedInLockupLock = false;
+      ChainSwapRepository.setRefundSignatureCreated = jest.fn(async () => {
+        recordedInLockupLock = lockupLockHeld;
+      }) as any;
+
       await expect(
         signerWithArk.signRefundArk(swapId, inputRefundTx, inputCheckpoint),
       ).resolves.toEqual({
@@ -615,6 +631,16 @@ describe('ChainSwapSigner', () => {
       expect(
         ChainSwapRepository.setRefundSignatureCreated,
       ).toHaveBeenCalledWith(swapId);
+      expect(recordedInLockupLock).toEqual(true);
+      expect(
+        (ChainSwapRepository.setRefundSignatureCreated as jest.Mock).mock
+          .invocationCallOrder[0],
+      ).toBeLessThan(
+        Math.min(
+          ...(arkCurrency.arkNode!.signTransaction as jest.Mock).mock
+            .invocationCallOrder,
+        ),
+      );
 
       expect(checkArkTransactionSpy).toHaveBeenCalledTimes(1);
       expect(checkArkTransactionSpy).toHaveBeenCalledWith(

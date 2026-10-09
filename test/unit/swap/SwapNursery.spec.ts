@@ -170,6 +170,7 @@ describe('SwapNursery', () => {
 
   const mockChainSwapSigner = {
     setAttemptSettle: jest.fn(),
+    setLockupLock: jest.fn(),
     on: jest.fn(),
     registerForClaim: jest.fn(),
   } as any;
