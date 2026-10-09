@@ -74,11 +74,25 @@ class GrpcServer {
     });
   }
 
+  private static readonly loopbackHosts = ['127.0.0.1', 'localhost', '::1'];
+
   public listen = async () => {
     const { port, host } = this.config;
 
     if (!Number.isInteger(port) || port > 65535) {
       throw 'invalid port for gRPC server';
+    }
+
+    // Fail closed: never expose the admin gRPC API on a non-loopback interface
+    // without both authentication factors (mTLS + JWT).
+    if (!GrpcServer.loopbackHosts.includes(host)) {
+      if (this.config.jwt?.disable) {
+        throw 'refusing to start gRPC server on a non-loopback host with JWT authentication disabled';
+      }
+
+      if (this.config.disableSsl) {
+        throw 'refusing to start gRPC server on a non-loopback host with SSL disabled';
+      }
     }
 
     if (!this.config.jwt?.disable) {

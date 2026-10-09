@@ -1,4 +1,4 @@
-import { createHmac } from 'crypto';
+import { createHmac, timingSafeEqual } from 'crypto';
 import type { Request } from 'express';
 import { getUnixTime } from '../Utils';
 import type Referral from '../db/models/Referral';
@@ -49,7 +49,15 @@ class Bouncer {
 
     const hexHmac = hmac.digest('hex');
 
-    if (providedHmac !== hexHmac) {
+    // Constant-time comparison to avoid a timing side channel (CWE-208) that
+    // could otherwise leak the expected HMAC byte by byte.
+    const providedBuffer = Buffer.from(providedHmac, 'hex');
+    const expectedBuffer = Buffer.from(hexHmac, 'hex');
+
+    if (
+      providedBuffer.length !== expectedBuffer.length ||
+      !timingSafeEqual(providedBuffer, expectedBuffer)
+    ) {
       throw Bouncer.errorUnauthorized;
     }
   };

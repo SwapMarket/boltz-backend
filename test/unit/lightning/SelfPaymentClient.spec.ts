@@ -403,10 +403,10 @@ describe('SelfPaymentClient', () => {
 
     test.each`
       description                                 | reversePair    | reverseBlocksLeft | shouldThrow
-      ${'same currency, exactly at the boundary'} | ${'BTC/BTC'}   | ${85}             | ${true}
-      ${'same currency, one block clear'}         | ${'BTC/BTC'}   | ${84}             | ${false}
-      ${'cross chain, exactly at the boundary'}   | ${'L-BTC/BTC'} | ${80}             | ${true}
-      ${'cross chain, one block clear'}           | ${'L-BTC/BTC'} | ${79}             | ${false}
+      ${'same currency, exactly at the boundary'} | ${'BTC/BTC'}   | ${40}             | ${true}
+      ${'same currency, one block clear'}         | ${'BTC/BTC'}   | ${39}             | ${false}
+      ${'cross chain, exactly at the boundary'}   | ${'L-BTC/BTC'} | ${32}             | ${true}
+      ${'cross chain, one block clear'}           | ${'L-BTC/BTC'} | ${31}             | ${false}
     `(
       'should apply the reverse swap timeout guard at the exact boundary: $description',
       async ({ reversePair, reverseBlocksLeft, shouldThrow }) => {
@@ -452,8 +452,8 @@ describe('SelfPaymentClient', () => {
 
     test.each`
       description                           | reverseBlocksLeft | shouldThrow
-      ${'rejects at the buffered boundary'} | ${85}             | ${true}
-      ${'allows one block clear'}           | ${84}             | ${false}
+      ${'rejects at the buffered boundary'} | ${40}             | ${true}
+      ${'allows one block clear'}           | ${39}             | ${false}
     `(
       'should denominate the reverse timeout in the submarine lightning currency: $description',
       async ({ reverseBlocksLeft, shouldThrow }) => {
@@ -549,8 +549,8 @@ describe('SelfPaymentClient', () => {
 
       test.each`
         description                | cltvLimit | shouldThrow
-        ${'at the real threshold'} | ${159}    | ${true}
-        ${'one block above it'}    | ${160}    | ${false}
+        ${'at the real threshold'} | ${204}    | ${true}
+        ${'one block above it'}    | ${205}    | ${false}
       `(
         'should guard against the reverse swap onchain timeout $description',
         async ({ cltvLimit, shouldThrow }) => {
@@ -592,7 +592,7 @@ describe('SelfPaymentClient', () => {
       test('should guard at the CLTV the hold invoice of the reverse swap advertises', () => {
         expect(
           TimeoutDeltaProvider.addBuffer(reverseOnchainDelta, true),
-        ).toEqual(159);
+        ).toEqual(204);
       });
     });
 

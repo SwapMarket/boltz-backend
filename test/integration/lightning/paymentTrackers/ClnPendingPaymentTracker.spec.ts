@@ -106,6 +106,15 @@ describe('ClnPendingPaymentTracker', () => {
       tracker.trackPayment(clnClient, preimageHash, invoice, promise);
       await expect(promise).rejects.toEqual(expect.anything());
 
+      for (
+        let i = 1;
+        i < ClnPendingPaymentTracker.maxEmptyListPaysChecks;
+        i++
+      ) {
+        await tracker['checkPendingPayments']();
+      }
+      expect(LightningPaymentRepository.setStatus).not.toHaveBeenCalled();
+
       await tracker['checkPendingPayments']();
 
       expect(LightningPaymentRepository.setStatus).toHaveBeenCalledTimes(1);

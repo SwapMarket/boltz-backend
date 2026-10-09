@@ -22,7 +22,12 @@ use elements::{
 };
 use elements::{SchnorrSig, pset::serialize::Serialize};
 use futures_util::StreamExt;
-use std::{collections::HashMap, str::FromStr, sync::Arc};
+use std::{
+    collections::HashMap,
+    str::FromStr,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 /// Short TTL so that clients can't reserve UTXOs for too long
 const CACHE_TTL: u64 = 15;
@@ -36,12 +41,20 @@ type RescueNode<'a> = (
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct PendingRescue {
-    sec_nonce: String,
     pub_nonce: String,
     sighash: String,
     funding_txid: String,
     funding_vout: u32,
     transaction: String,
+}
+
+/// Secret MuSig2 signing nonce for a pending asset rescue. Held in-process only
+/// (never serialized to the shared cache) between the create and broadcast
+/// requests so the value whose leak yields the per-swap key cannot be read from
+/// shared infrastructure (SIG-001).
+struct PendingSecNonce {
+    sec_nonce: Vec<u8>,
+    expires_at: Instant,
 }
 
 struct AssetRescueDetails {
@@ -66,6 +79,10 @@ pub struct AssetRescueConfig {
 pub struct AssetRescue {
     utxo_mutex: tokio::sync::Mutex<()>,
 
+    // Secret MuSig2 signing nonces for pending rescues, kept in this process
+    // only and taken exactly once at broadcast time (SIG-001). Keyed by swap id.
+    sec_nonces: Mutex<HashMap<String, PendingSecNonce>>,
+
     cache: Cache,
     wallets: HashMap<String, String>,
     currencies: Currencies,
@@ -89,6 +106,7 @@ impl AssetRescue {
 
         Self {
             utxo_mutex: tokio::sync::Mutex::new(()),
+            sec_nonces: Mutex::new(HashMap::new()),
             cache,
             wallets,
             currencies,
@@ -208,12 +226,12 @@ impl AssetRescue {
         let sec_nonce = musig.dangerous_secnonce().dangerous_into_bytes();
 
         let tx = hex::encode(tx.serialize());
+        // Only the public material is written to the (possibly shared) cache.
         self.cache
             .set(
                 CACHE_KEY,
                 &Self::cache_field_swap(swap_id),
                 &PendingRescue {
-                    sec_nonce: hex::encode(sec_nonce),
                     pub_nonce: hex::encode(pub_nonce),
                     sighash: hex::encode(sighash),
                     funding_txid: funding_utxo.txid.to_string(),
@@ -223,6 +241,22 @@ impl AssetRescue {
                 Some(CACHE_TTL),
             )
             .await?;
+
+        // SIG-001: keep the secret signing nonce in-process only. Prune expired
+        // entries first so an abandoned create() (never broadcast) cannot leak
+        // memory beyond its TTL.
+        {
+            let now = Instant::now();
+            let mut nonces = self.sec_nonces.lock().unwrap();
+            nonces.retain(|_, entry| entry.expires_at > now);
+            nonces.insert(
+                swap_id.to_string(),
+                PendingSecNonce {
+                    sec_nonce: sec_nonce.to_vec(),
+                    expires_at: now + Duration::from_secs(CACHE_TTL),
+                },
+            );
+        }
 
         tracing::info!(
             "Created funding rescue for swap {swap_id} in transaction {transaction_id}:{vout}"
@@ -257,6 +291,22 @@ impl AssetRescue {
             }
         };
 
+        // SIG-001: take the secret nonce from the in-process store exactly once.
+        // A missing entry means the rescue was created on a different process /
+        // replica or before a restart; it must be re-created (which mints a fresh
+        // nonce) rather than reusing anything.
+        let mut sec_nonce = {
+            let now = Instant::now();
+            let mut nonces = self.sec_nonces.lock().unwrap();
+            nonces.retain(|_, entry| entry.expires_at > now);
+            match nonces.remove(swap_id) {
+                Some(entry) => entry.sec_nonce,
+                None => {
+                    return Err(anyhow::anyhow!("no rescue is pending"));
+                }
+            }
+        };
+
         let (swap, symbol, swap_rescue_details) = self.get_swap(swap_id)?;
 
         let res = self
@@ -265,10 +315,15 @@ impl AssetRescue {
                 swap,
                 swap_rescue_details,
                 &pending_rescue,
+                &sec_nonce,
                 pub_nonce,
                 partial_signature,
             )
             .await;
+
+        // Zeroize the secret nonce copy now that the signing session has consumed
+        // it, regardless of whether broadcasting succeeded.
+        sec_nonce.iter_mut().for_each(|byte| *byte = 0);
 
         if let Err(e) = self
             .cache
@@ -292,12 +347,14 @@ impl AssetRescue {
         res
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn broadcast_inner(
         &self,
         symbol: &str,
         swap: Box<dyn SomeSwap + Send + Sync>,
         swap_rescue_details: AssetRescueDetails,
         pending_rescue: &PendingRescue,
+        sec_nonce: &[u8],
         pub_nonce: &[u8],
         partial_signature: &[u8],
     ) -> Result<String> {
@@ -334,7 +391,7 @@ impl AssetRescue {
 
         let musig = musig
             .dangerous_set_nonce(
-                hex::decode(&pending_rescue.sec_nonce)?.as_slice(),
+                sec_nonce,
                 hex::decode(&pending_rescue.pub_nonce)?.as_slice(),
             )?
             .aggregate_nonces(vec![(
@@ -708,6 +765,7 @@ mod tests {
 
         let asset_rescue = AssetRescue {
             utxo_mutex: tokio::sync::Mutex::new(()),
+            sec_nonces: Mutex::new(HashMap::new()),
             cache: Cache::Memory(MemCache::new()),
             wallets,
             currencies: Arc::new(HashMap::new()),
@@ -722,6 +780,7 @@ mod tests {
     async fn test_get_node_currency_not_found() {
         let asset_rescue = AssetRescue {
             utxo_mutex: tokio::sync::Mutex::new(()),
+            sec_nonces: Mutex::new(HashMap::new()),
             cache: Cache::Memory(MemCache::new()),
             wallets: HashMap::new(),
             currencies: Arc::new(HashMap::new()),
@@ -753,6 +812,7 @@ mod tests {
 
         let asset_rescue = AssetRescue {
             utxo_mutex: tokio::sync::Mutex::new(()),
+            sec_nonces: Mutex::new(HashMap::new()),
             cache: Cache::Memory(MemCache::new()),
             wallets: HashMap::new(),
             currencies: Arc::new(currencies_map),
@@ -796,6 +856,7 @@ mod tests {
 
         let asset_rescue = AssetRescue {
             utxo_mutex: tokio::sync::Mutex::new(()),
+            sec_nonces: Mutex::new(HashMap::new()),
             cache: Cache::Memory(MemCache::new()),
             wallets: HashMap::new(),
             currencies: Arc::new(HashMap::new()),
@@ -834,6 +895,7 @@ mod tests {
 
         let asset_rescue = AssetRescue {
             utxo_mutex: tokio::sync::Mutex::new(()),
+            sec_nonces: Mutex::new(HashMap::new()),
             cache: Cache::Memory(MemCache::new()),
             wallets: HashMap::new(),
             currencies: Arc::new(HashMap::new()),
@@ -900,6 +962,7 @@ mod tests {
 
         let asset_rescue = AssetRescue {
             utxo_mutex: tokio::sync::Mutex::new(()),
+            sec_nonces: Mutex::new(HashMap::new()),
             cache: Cache::Memory(MemCache::new()),
             wallets: HashMap::new(),
             currencies: Arc::new(HashMap::new()),
@@ -931,6 +994,7 @@ mod tests {
 
         let asset_rescue = AssetRescue {
             utxo_mutex: tokio::sync::Mutex::new(()),
+            sec_nonces: Mutex::new(HashMap::new()),
             cache: Cache::Memory(MemCache::new()),
             wallets: HashMap::new(),
             currencies: Arc::new(HashMap::new()),
@@ -953,6 +1017,7 @@ mod tests {
 
         let asset_rescue = AssetRescue {
             utxo_mutex: tokio::sync::Mutex::new(()),
+            sec_nonces: Mutex::new(HashMap::new()),
             cache: Cache::Memory(MemCache::new()),
             wallets: HashMap::new(),
             currencies: Arc::new(HashMap::new()),
@@ -1002,6 +1067,7 @@ mod tests {
 
         let asset_rescue = AssetRescue {
             utxo_mutex: tokio::sync::Mutex::new(()),
+            sec_nonces: Mutex::new(HashMap::new()),
             cache,
             wallets: HashMap::new(),
             currencies: Arc::new(HashMap::new()),
@@ -1030,6 +1096,7 @@ mod tests {
 
         let asset_rescue = AssetRescue {
             utxo_mutex: tokio::sync::Mutex::new(()),
+            sec_nonces: Mutex::new(HashMap::new()),
             cache: Cache::Memory(MemCache::new()),
             wallets: HashMap::new(),
             currencies: Arc::new(HashMap::new()),
@@ -1057,6 +1124,7 @@ mod tests {
 
         let asset_rescue = AssetRescue {
             utxo_mutex: tokio::sync::Mutex::new(()),
+            sec_nonces: Mutex::new(HashMap::new()),
             cache: Cache::Memory(MemCache::new()),
             wallets: HashMap::new(),
             currencies: Arc::new(HashMap::new()),
@@ -1260,6 +1328,7 @@ mod tests {
 
         let asset_rescue = AssetRescue {
             utxo_mutex: tokio::sync::Mutex::new(()),
+            sec_nonces: Mutex::new(HashMap::new()),
             cache: Cache::Memory(MemCache::new()),
             wallets: HashMap::new(),
             currencies: Arc::new(currencies_map),
