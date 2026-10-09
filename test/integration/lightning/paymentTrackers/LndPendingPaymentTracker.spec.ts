@@ -9,7 +9,7 @@ import LndClient from '../../../../lib/lightning/LndClient';
 import LndPendingPaymentTracker from '../../../../lib/lightning/paymentTrackers/LndPendingPaymentTracker';
 import { PaymentFailureReason } from '../../../../lib/proto/lnd/rpc';
 import Sidecar from '../../../../lib/sidecar/Sidecar';
-import { wait } from '../../../Utils';
+import { waitForFunctionToBeTrue } from '../../../Utils';
 import { createInvoice } from '../../../unit/swap/InvoiceUtils';
 import { bitcoinLndClient, bitcoinLndClient2 } from '../../Nodes';
 import { sidecar, startSidecar } from '../../sidecar/Utils';
@@ -139,12 +139,16 @@ describe('LndPendingPaymentTracker', () => {
       const { preimage, preimageHash } = newPreimage();
       const invoice = await bitcoinLndClient2.addHoldInvoice(1, preimageHash);
       bitcoinLndClient2.subscribeSingleInvoice(preimageHash);
-      bitcoinLndClient2.on('htlc.accepted', async () => {
-        await bitcoinLndClient2.settleHoldInvoice(preimage);
+      // Watch only once the payment is in flight, so lnd knows about it
+      const inFlight = new Promise<void>((resolve) => {
+        bitcoinLndClient2.on('htlc.accepted', async () => {
+          resolve();
+          await bitcoinLndClient2.settleHoldInvoice(preimage);
+        });
       });
 
       const paymentPromise = bitcoinLndClient.sendPayment(invoice);
-      await wait(50);
+      await inFlight;
 
       tracker.watchPayment(
         bitcoinLndClient,
@@ -153,7 +157,11 @@ describe('LndPendingPaymentTracker', () => {
       );
       await paymentPromise;
 
-      await wait(50);
+      await waitForFunctionToBeTrue(
+        () =>
+          (LightningPaymentRepository.setStatus as jest.Mock).mock.calls
+            .length > 0,
+      );
 
       expect(LightningPaymentRepository.setStatus).toHaveBeenCalledTimes(1);
       expect(LightningPaymentRepository.setStatus).toHaveBeenCalledWith(
@@ -167,12 +175,15 @@ describe('LndPendingPaymentTracker', () => {
       const { preimageHash } = newPreimage();
       const invoice = await bitcoinLndClient2.addHoldInvoice(1, preimageHash);
       bitcoinLndClient2.subscribeSingleInvoice(preimageHash);
-      bitcoinLndClient2.on('htlc.accepted', async () => {
-        await bitcoinLndClient2.cancelHoldInvoice(preimageHash);
+      const inFlight = new Promise<void>((resolve) => {
+        bitcoinLndClient2.on('htlc.accepted', async () => {
+          resolve();
+          await bitcoinLndClient2.cancelHoldInvoice(preimageHash);
+        });
       });
 
       const paymentPromise = bitcoinLndClient.sendPayment(invoice);
-      await wait(50);
+      await inFlight;
 
       tracker.watchPayment(
         bitcoinLndClient,
@@ -183,7 +194,11 @@ describe('LndPendingPaymentTracker', () => {
         PaymentFailureReason.FAILURE_REASON_INCORRECT_PAYMENT_DETAILS,
       );
 
-      await wait(50);
+      await waitForFunctionToBeTrue(
+        () =>
+          (LightningPaymentRepository.setStatus as jest.Mock).mock.calls
+            .length > 0,
+      );
 
       expect(LightningPaymentRepository.setStatus).toHaveBeenCalledTimes(1);
       expect(LightningPaymentRepository.setStatus).toHaveBeenCalledWith(
