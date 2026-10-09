@@ -466,7 +466,7 @@ class PaymentHandler {
     response: PaymentResponse,
   ): Promise<Buffer> => {
     this.logger.verbose(
-      `Paid invoice of Swap ${swap.id} (${swap.preimageHash}): ${getHexString(response.preimage)}`,
+      `Paid invoice of Swap ${swap.id} (${swap.preimageHash})`,
     );
 
     this.swapNursery.emit(

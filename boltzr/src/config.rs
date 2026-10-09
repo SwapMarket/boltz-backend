@@ -88,7 +88,10 @@ pub struct GlobalConfig {
 pub fn parse_config(path: &str) -> Result<GlobalConfig, Box<dyn Error>> {
     debug!("Reading config: {}", path);
     let mut config = toml::from_str::<GlobalConfig>(fs::read_to_string(path)?.as_ref())?;
-    trace!("Read config: {:#}", serde_json::to_string_pretty(&config)?);
+    // Never serialize the parsed config into logs (even at trace level): it holds
+    // secrets such as the Postgres password, notification tokens, node macaroons
+    // and RPC credentials. The source path is already logged above.
+    trace!("Parsed config file");
 
     let default_mnemonic_path = Path::new(path)
         .parent()
@@ -142,10 +145,9 @@ pub fn parse_config(path: &str) -> Result<GlobalConfig, Box<dyn Error>> {
         );
     }
 
-    trace!(
-        "Sanitized config: {:#}",
-        serde_json::to_string_pretty(&config)?
-    );
+    // This config still contains secrets (it is only "sanitized" in the sense
+    // that default paths were filled in), so do not serialize it into logs.
+    trace!("Applied config defaults");
     Ok(config)
 }
 

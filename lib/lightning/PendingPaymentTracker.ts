@@ -25,6 +25,7 @@ import type ClnClient from './cln/ClnClient';
 import ClnPendingPaymentTracker from './paymentTrackers/ClnPendingPaymentTracker';
 import LndPendingPaymentTracker from './paymentTrackers/LndPendingPaymentTracker';
 import type NodePendingPaymentTracker from './paymentTrackers/NodePendingPaymentTracker';
+import { PaymentStatusKind } from './paymentTrackers/NodePendingPaymentTracker';
 
 type LightningNodes = Map<string, LightningClient>;
 
@@ -225,6 +226,24 @@ class PendingPaymentTracker {
       payments,
     );
 
+    // Before paying on a node that differs from one that already attempted this
+    // invoice, verify the previous node's authoritative state. A local
+    // TemporaryFailure is not proof the previous attempt is dead (it can be
+    // written for transient lookup faults), so re-paying elsewhere could settle
+    // the invoice twice (operator fund loss).
+    const crossNode = await this.resolveCrossNodePayment(
+      swap,
+      paymentHash,
+      lightningClient,
+      payments,
+    );
+    if (crossNode.action === 'settle') {
+      return crossNode.response;
+    }
+    if (crossNode.action === 'abstain') {
+      return undefined;
+    }
+
     return await this.sendPaymentWithNode(
       swap,
       lightningClient,
@@ -232,6 +251,83 @@ class PendingPaymentTracker {
       cltvLimit,
       timePreference,
     );
+  };
+
+  private resolveCrossNodePayment = async (
+    swap: Swap,
+    paymentHash: string,
+    chosenNode: LightningClient,
+    payments: LightningPayment[],
+  ): Promise<
+    | { action: 'proceed' }
+    | { action: 'abstain' }
+    | { action: 'settle'; response: PaymentResponse }
+  > => {
+    const otherNodeIds = Array.from(
+      new Set(
+        payments
+          .filter(
+            (p) =>
+              p.nodeId !== chosenNode.id &&
+              p.status === LightningPaymentStatus.TemporaryFailure,
+          )
+          .map((p) => p.nodeId),
+      ),
+    );
+    if (otherNodeIds.length === 0) {
+      return { action: 'proceed' };
+    }
+
+    const nodes = this.lightningNodes.get(chosenNode.symbol);
+    for (const nodeId of otherNodeIds) {
+      const client = nodes.get(nodeId);
+      if (client === undefined) {
+        this.logger.warn(
+          `Cannot verify previous payment attempt of ${swap.id} (${paymentHash}) on unavailable node ${nodeId}; not paying on ${chosenNode.id} to avoid a double payment`,
+        );
+        return { action: 'abstain' };
+      }
+
+      const status = await this.lightningTrackers[
+        client.type
+      ].checkPaymentStatus(client, swap.invoice!, paymentHash);
+
+      switch (status.kind) {
+        case PaymentStatusKind.Succeeded:
+          this.logger.info(
+            `Previous payment attempt of ${swap.id} (${paymentHash}) on ${client.symbol} ${client.id} already succeeded; settling instead of paying again`,
+          );
+          await LightningPaymentRepository.setStatus(
+            paymentHash,
+            client.id,
+            LightningPaymentStatus.Success,
+          );
+          return { action: 'settle', response: status.response };
+
+        case PaymentStatusKind.Pending:
+          this.logger.warn(
+            `Previous payment attempt of ${swap.id} (${paymentHash}) on ${client.symbol} ${client.id} is still pending; not paying on ${chosenNode.id} to avoid a double payment`,
+          );
+          this.lightningTrackers[client.type].watchPayment(
+            client,
+            swap.invoice!,
+            paymentHash,
+          );
+          return { action: 'abstain' };
+
+        case PaymentStatusKind.Unknown:
+          this.logger.warn(
+            `Could not determine status of previous payment attempt of ${swap.id} (${paymentHash}) on ${client.symbol} ${client.id}; not paying on ${chosenNode.id} to avoid a double payment`,
+          );
+          return { action: 'abstain' };
+
+        case PaymentStatusKind.Failed:
+          // Verified terminal failure on that node: safe to consider paying elsewhere.
+          break;
+      }
+    }
+
+    return { action: 'proceed' };
   };
 
   private checkInvoiceTimeout = async (

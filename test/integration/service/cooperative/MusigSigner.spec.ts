@@ -535,6 +535,11 @@ describe('MusigSigner', () => {
         ),
       });
       WrappedSwapRepository.setPreimage = jest.fn();
+      (nursery.settleReverseSwapInvoice as jest.Mock).mockImplementationOnce(
+        async (swap: { status: string }) => {
+          swap.status = SwapUpdateEvent.InvoiceSettled;
+        },
+      );
 
       btcWallet.getKeysByIndex = jest.fn().mockReturnValue(refundKeys);
 

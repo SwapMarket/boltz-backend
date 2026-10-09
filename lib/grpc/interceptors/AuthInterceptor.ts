@@ -3,7 +3,7 @@ import { ServerInterceptingCall, status } from '@grpc/grpc-js';
 import type Logger from '../../Logger';
 import JwtTokenRepository from '../../db/repositories/JwtTokenRepository';
 import type JwtSigner from '../JwtSigner';
-import { wildcardAll } from '../MethodRegistry';
+import { sensitiveMethodPaths, wildcardAll } from '../MethodRegistry';
 
 const bearerPrefix = 'bearer ';
 
@@ -11,8 +11,20 @@ export const isMethodAllowed = (
   methodPath: string,
   allowedMethods: string[],
 ): boolean => {
+  // Sensitive (key-export) methods require an exact allowlist entry; wildcard
+  // and service-wildcard grants do not cover them.
+  const requiresExplicitGrant = sensitiveMethodPaths.has(methodPath);
+
   for (const entry of allowedMethods) {
-    if (entry === wildcardAll || entry === methodPath) {
+    if (entry === methodPath) {
+      return true;
+    }
+
+    if (requiresExplicitGrant) {
+      continue;
+    }
+
+    if (entry === wildcardAll) {
       return true;
     }
 

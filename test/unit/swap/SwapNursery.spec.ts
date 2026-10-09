@@ -3151,6 +3151,101 @@ describe('SwapNursery', () => {
     });
   });
 
+  describe('settleConfirmedLockup', () => {
+    let attemptSettleSwapSpy: jest.SpyInstance;
+    let lockupFailedSpy: jest.SpyInstance;
+    let isUnacceptableOverpay: jest.Mock;
+
+    beforeEach(() => {
+      attemptSettleSwapSpy = jest
+        .spyOn(swapNursery, 'attemptSettleSwap')
+        .mockResolvedValue(undefined);
+      lockupFailedSpy = jest
+        .spyOn(swapNursery as any, 'lockupFailed')
+        .mockResolvedValue(undefined);
+      isUnacceptableOverpay = jest.fn().mockReturnValue(false);
+      (swapNursery as any).overpaymentProtector = { isUnacceptableOverpay };
+    });
+
+    const swapWith = (expectedAmount: number, onchainAmount: number) =>
+      ({
+        id: 'lock-first-swap',
+        type: SwapType.Submarine,
+        pair: 'BTC/BTC',
+        orderSide: OrderSide.BUY,
+        expectedAmount,
+        onchainAmount,
+      }) as unknown as Swap;
+
+    test('should settle directly on an exact amount match', async () => {
+      await swapNursery.settleConfirmedLockup(
+        mockCurrency,
+        swapWith(100_000, 100_000),
+      );
+
+      expect(attemptSettleSwapSpy).toHaveBeenCalledTimes(1);
+      expect(lockupFailedSpy).not.toHaveBeenCalled();
+    });
+
+    test('should settle when overpaid within the accepted tolerance', async () => {
+      isUnacceptableOverpay.mockReturnValue(false);
+
+      await swapNursery.settleConfirmedLockup(
+        mockCurrency,
+        swapWith(100_000, 100_001),
+      );
+
+      expect(isUnacceptableOverpay).toHaveBeenCalledWith(
+        SwapType.Submarine,
+        100_000,
+        100_001,
+      );
+      expect(attemptSettleSwapSpy).toHaveBeenCalledTimes(1);
+      expect(lockupFailedSpy).not.toHaveBeenCalled();
+    });
+
+    test('should fail the swap when the lockup is insufficient', async () => {
+      await swapNursery.settleConfirmedLockup(
+        mockCurrency,
+        swapWith(100_000, 99_999),
+      );
+
+      expect(attemptSettleSwapSpy).not.toHaveBeenCalled();
+      expect(lockupFailedSpy).toHaveBeenCalledWith(
+        expect.anything(),
+        Errors.INSUFFICIENT_AMOUNT(99_999, 100_000).message,
+      );
+    });
+
+    test('should fail the swap when no coins were received', async () => {
+      await swapNursery.settleConfirmedLockup(
+        mockCurrency,
+        swapWith(100_000, 0),
+      );
+
+      expect(attemptSettleSwapSpy).not.toHaveBeenCalled();
+      expect(lockupFailedSpy).toHaveBeenCalledWith(
+        expect.anything(),
+        Errors.INCORRECT_ASSET_SENT().message,
+      );
+    });
+
+    test('should fail the swap on an unacceptable overpayment', async () => {
+      isUnacceptableOverpay.mockReturnValue(true);
+
+      await swapNursery.settleConfirmedLockup(
+        mockCurrency,
+        swapWith(100_000, 200_000),
+      );
+
+      expect(attemptSettleSwapSpy).not.toHaveBeenCalled();
+      expect(lockupFailedSpy).toHaveBeenCalledWith(
+        expect.anything(),
+        Errors.OVERPAID_AMOUNT(200_000, 100_000).message,
+      );
+    });
+  });
+
   describe('attemptSettleSwap idempotency', () => {
     const mockPreimage = Buffer.from('preimage');
 

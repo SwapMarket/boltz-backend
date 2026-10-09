@@ -1,6 +1,8 @@
 import { status } from '@grpc/grpc-js';
 import type { ServerDuplexStream, handleUnaryCall } from '@grpc/grpc-js';
+import fs from 'fs';
 import type { Transaction as TransactionLiquid } from 'liquidjs-lib';
+import path from 'path';
 import process from 'process';
 import { parseTransaction } from '../Core';
 import { dumpHeap } from '../HeapDump';
@@ -521,12 +523,25 @@ class GrpcService {
     });
   };
 
+  private static readonly heapDumpDir = 'heapdumps';
+
   public devHeapDump: handleUnaryCall<
     boltzrpc.DevHeapDumpRequest,
     boltzrpc.DevHeapDumpResponse
   > = async (call, callback) => {
     await GrpcService.handleCallback(call, callback, async () => {
-      const filePath = call.request.path || `${getUnixTime()}.heapsnapshot`;
+      // Never trust the caller-supplied path: strip any directory components so
+      // the snapshot (which contains key material) cannot be written outside
+      // the dedicated dump directory via path traversal.
+      const requested = call.request.path;
+      const fileName =
+        requested !== undefined && requested.length > 0
+          ? path.basename(requested)
+          : `${getUnixTime()}.heapsnapshot`;
+
+      const dumpDir = path.resolve(GrpcService.heapDumpDir);
+      fs.mkdirSync(dumpDir, { recursive: true, mode: 0o700 });
+      const filePath = path.join(dumpDir, fileName);
 
       this.logger.verbose(`Dumping heap at: ${filePath}`);
       await dumpHeap(filePath);

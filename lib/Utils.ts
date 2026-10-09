@@ -2,7 +2,7 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { hexToBytes } from '@noble/hashes/utils.js';
 import { Transaction as ScureTransaction } from '@scure/btc-signer';
 import { OutputType, Scripts } from 'boltz-core';
-import { randomBytes } from 'crypto';
+import { randomBytes, randomInt } from 'crypto';
 import type {
   ContractTransactionResponse,
   TransactionReceipt,
@@ -44,16 +44,26 @@ export const generateId = (length = 6): string => {
   let id = '';
 
   for (let i = 0; i < length; i += 1) {
-    id += idPossibilities.charAt(
-      Math.floor(Math.random() * idPossibilities.length),
-    );
+    // Use the OS CSPRNG (with rejection sampling internally) instead of
+    // Math.random so swap IDs are not predictable from observed outputs.
+    id += idPossibilities.charAt(randomInt(idPossibilities.length));
   }
 
   return id;
 };
 
+// Swap IDs act as bearer identifiers on the public REST/WebSocket API, so they
+// must not be brute-force enumerable. Legacy IDs used to be 6 characters
+// (~35 bits of entropy); generate them with 12 characters (~70 bits) like
+// Taproot IDs. Previously created shorter IDs keep working because the swap
+// version is tracked in an explicit field, never inferred from the ID length.
+const swapIdLength: Record<SwapVersion, number> = {
+  [SwapVersion.Legacy]: 12,
+  [SwapVersion.Taproot]: 12,
+};
+
 export const generateSwapId = (version: SwapVersion): string =>
-  generateId(version === SwapVersion.Legacy ? undefined : 12);
+  generateId(swapIdLength[version]);
 
 /**
  * Stringify any object or array

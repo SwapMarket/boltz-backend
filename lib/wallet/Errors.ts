@@ -8,8 +8,8 @@ export default {
     message: 'wallet not initialized',
     code: concatErrorCode(ErrorCodePrefix.Wallet, 0),
   }),
-  INVALID_MNEMONIC: (mnemonic: string): Error => ({
-    message: `mnemonic "${mnemonic}" is invalid`,
+  INVALID_MNEMONIC: (filename: string): Error => ({
+    message: `mnemonic in ${filename} failed validation`,
     code: concatErrorCode(ErrorCodePrefix.Wallet, 1),
   }),
   INVALID_DEPTH_INDEX: (depth: number): Error => ({

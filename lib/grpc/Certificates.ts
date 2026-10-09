@@ -19,7 +19,7 @@ export const getCertificate = (
   caCert?: KeyCertPair,
 ): KeyCertPair => {
   if (!fs.existsSync(basePath)) {
-    fs.mkdirSync(basePath, { recursive: true });
+    fs.mkdirSync(basePath, { recursive: true, mode: 0o700 });
   }
 
   const { certPath, keyPath } = getFilePaths(basePath, name);
@@ -113,11 +113,11 @@ const generateCertificate = (
   const keyPem = forge.pki.privateKeyToPem(key.privateKey);
   const certPem = forge.pki.certificateToPem(cert);
 
-  for (const [path, data] of [
-    [keyPath, keyPem],
-    [certPath, certPem],
-  ]) {
-    fs.writeFileSync(path, data, { encoding: 'utf-8' });
+  for (const [path, data, mode] of [
+    [keyPath, keyPem, 0o600],
+    [certPath, certPem, 0o644],
+  ] as [string, string, number][]) {
+    fs.writeFileSync(path, data, { encoding: 'utf-8', mode });
   }
 
   return {
