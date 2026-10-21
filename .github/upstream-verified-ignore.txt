@@ -1,0 +1,18 @@
+# Upstream commits checked and deliberately not taken, which
+# .github/scripts/check-upstreams.sh would otherwise keep reporting.
+#
+# One commit per line: the full or short SHA used in the report, then a
+# reason. Add a commit only after reading its diff and confirming it is
+# already covered here or not wanted.
+
+# SatsRouting: README, docs and rebranding only (Boltz -> SatsRouting in
+# comments, API descriptions and docs), reviewed 2026-10-22
+ed3d8859 README
+4c57fd8d README
+42940290 description
+2838de70 docs
+78a7d7b1 SatsRouting exchange
+e8f9adcc rebranding
+ebaebc5f rebranding
+82bee9ba API docs link
+0f75a4f5 README
