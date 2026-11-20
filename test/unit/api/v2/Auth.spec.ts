@@ -235,6 +235,62 @@ describe('Auth', () => {
     expect(status).toHaveBeenCalledWith(401);
   });
 
+  test('should accept identical GET requests in the same second', () => {
+    const secret = 'secret';
+    const ts = getUnixTime();
+    const path = '/v2/swap/chain/abc123/transactions';
+    const signature = sign(secret, ts, 'GET', path, '');
+
+    const makeReq = () =>
+      ({
+        get: jest.fn().mockImplementation((name: string) => {
+          if (name === Auth.timestampHeader) return ts.toString();
+          if (name === Auth.signatureHeader) return signature;
+          return undefined;
+        }),
+        method: 'GET',
+        originalUrl: path,
+      }) as any;
+
+    for (let i = 0; i < 2; i++) {
+      const next = jest.fn();
+      Auth.middleware(Logger.disabledLogger, secret)(
+        makeReq(),
+        {} as any,
+        next,
+      );
+      expect(next).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  test('should log the reason of a rejection but not tell the client', () => {
+    const warn = jest.fn();
+    const status = jest.fn().mockReturnThis();
+    const json = jest.fn();
+    const req = {
+      get: jest
+        .fn()
+        .mockImplementation((name: string) =>
+          name === Auth.timestampHeader ? getUnixTime().toString() : 'ab',
+        ),
+      method: 'POST',
+      originalUrl: '/v2/swap/submarine',
+      rawBody: '{}',
+    } as any;
+
+    Auth.middleware({ warn } as any, 'secret')(
+      req,
+      { set: jest.fn(), status, json } as any,
+      jest.fn(),
+    );
+
+    expect(warn).toHaveBeenCalledWith(
+      'Request POST /v2/swap/submarine unauthorized: wrong signature',
+    );
+    expect(status).toHaveBeenCalledWith(401);
+    expect(json).toHaveBeenCalledWith({ error: 'unauthorized' });
+  });
+
   test('should not treat distinct signatures as replays of each other', () => {
     const secret = 'secret';
     const ts = getUnixTime();

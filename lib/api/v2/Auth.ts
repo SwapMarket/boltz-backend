@@ -2,7 +2,8 @@ import { createHmac, timingSafeEqual } from 'crypto';
 import type { NextFunction, Request, Response } from 'express';
 import type Logger from '../../Logger';
 import { getUnixTime } from '../../Utils';
-import { errorResponse } from '../Utils';
+import { errorResponse, setContentTypeJson } from '../Utils';
+import AuthRejection, { isReplayProtected } from './AuthRejection';
 import NodeAuth from './NodeAuth';
 
 // Restricts the v2 API to callers that know the configured "api.authSecret",
@@ -12,14 +13,13 @@ import NodeAuth from './NodeAuth';
 // opt-in: with no "authSecret" configured, the API stays open as before.
 // The timestamp bounds how long a captured request stays replayable, and
 // binding method+path stops a signature captured for one endpoint being
-// replayed against another that happens to accept a similarly-shaped body
+// replayed against another that happens to accept a similarly-shaped body.
+// Reads are not checked for replays: see isReplayProtected
 class Auth {
   public static readonly signatureHeader = 'x-api-signature';
   public static readonly timestampHeader = 'x-api-timestamp';
 
   private static readonly timestampDeltaTolerance = 60;
-
-  private static readonly errorUnauthorized = 'unauthorized';
 
   // signature (hex) -> unix time it stops being replayable. Only ever
   // populated with signatures that already passed HMAC verification, so an
@@ -45,7 +45,16 @@ class Auth {
           Auth.verify(req, secret);
         }
       } catch (e) {
-        errorResponse(logger, req, res, e, 401);
+        if (!(e instanceof AuthRejection)) {
+          errorResponse(logger, req, res, e, 401);
+          return;
+        }
+
+        logger.warn(
+          `Request ${req.method} ${req.originalUrl} unauthorized: ${e.reason}`,
+        );
+        setContentTypeJson(res);
+        res.status(401).json({ error: 'unauthorized' });
         return;
       }
 
@@ -58,7 +67,7 @@ class Auth {
     const provided = req.get(Auth.signatureHeader);
 
     if (provided === undefined) {
-      throw Auth.errorUnauthorized;
+      throw new AuthRejection('missing signature');
     }
 
     // eslint-disable-next-line @typescript-eslint/ban-ts-comment
@@ -75,17 +84,19 @@ class Auth {
       providedBuf.length !== expectedBuf.length ||
       !timingSafeEqual(providedBuf, expectedBuf)
     ) {
-      throw Auth.errorUnauthorized;
+      throw new AuthRejection('wrong signature');
     }
 
-    Auth.checkReplay(provided, ts);
+    if (isReplayProtected(req.method)) {
+      Auth.checkReplay(provided, ts);
+    }
   };
 
   private static checkReplay = (signature: string, ts: number) => {
     Auth.pruneExpiredSignatures();
 
     if (Auth.seenSignatures.has(signature)) {
-      throw Auth.errorUnauthorized;
+      throw new AuthRejection('replayed signature');
     }
 
     // Past this point a replay would fail checkTimestamp on its own anyway
@@ -104,12 +115,12 @@ class Auth {
 
   private static checkTimestamp = (providedTsRaw?: string): number => {
     if (providedTsRaw === undefined) {
-      throw Auth.errorUnauthorized;
+      throw new AuthRejection('missing timestamp');
     }
 
     const providedTs = parseInt(providedTsRaw, 10);
     if (isNaN(providedTs)) {
-      throw Auth.errorUnauthorized;
+      throw new AuthRejection('malformed timestamp');
     }
 
     const now = getUnixTime();
@@ -117,7 +128,9 @@ class Auth {
       providedTs > now + Auth.timestampDeltaTolerance ||
       providedTs < now - Auth.timestampDeltaTolerance
     ) {
-      throw Auth.errorUnauthorized;
+      throw new AuthRejection(
+        `timestamp ${providedTs} is ${now - providedTs}s off server time`,
+      );
     }
 
     return providedTs;

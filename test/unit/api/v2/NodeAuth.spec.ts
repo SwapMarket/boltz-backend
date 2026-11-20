@@ -3,6 +3,7 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import Logger from '../../../../lib/Logger';
 import { getHexString, getUnixTime } from '../../../../lib/Utils';
 import Auth from '../../../../lib/api/v2/Auth';
+import AuthRejection from '../../../../lib/api/v2/AuthRejection';
 import NodeAuth from '../../../../lib/api/v2/NodeAuth';
 import BlockedApiNodeRepository from '../../../../lib/db/repositories/BlockedApiNodeRepository';
 
@@ -151,7 +152,9 @@ describe('NodeAuth', () => {
     };
     req.get = jest.fn((name: string) => headers[name]);
 
-    await expect(nodeAuth.authenticate(req)).rejects.toEqual('unauthorized');
+    await expect(nodeAuth.authenticate(req)).rejects.toBeInstanceOf(
+      AuthRejection,
+    );
   });
 
   test('should reject a tampered body', async () => {
@@ -159,7 +162,7 @@ describe('NodeAuth', () => {
       nodeAuth.authenticate(
         makeRequest(makeNode(), { signedBody: '{"invoiceAmount":1}' }),
       ),
-    ).rejects.toEqual('unauthorized');
+    ).rejects.toBeInstanceOf(AuthRejection);
   });
 
   test('should reject a signature for another path', async () => {
@@ -167,7 +170,7 @@ describe('NodeAuth', () => {
       nodeAuth.authenticate(
         makeRequest(makeNode(), { signedUrl: '/swap/submarine' }),
       ),
-    ).rejects.toEqual('unauthorized');
+    ).rejects.toBeInstanceOf(AuthRejection);
   });
 
   test('should reject a stale timestamp', async () => {
@@ -175,7 +178,7 @@ describe('NodeAuth', () => {
       nodeAuth.authenticate(
         makeRequest(makeNode(), { ts: getUnixTime() - 120 }),
       ),
-    ).rejects.toEqual('unauthorized');
+    ).rejects.toBeInstanceOf(AuthRejection);
   });
 
   test('should reject a malformed node ID', async () => {
@@ -185,14 +188,38 @@ describe('NodeAuth', () => {
       name === NodeAuth.nodeIdHeader ? 'not a node' : get(name),
     );
 
-    await expect(nodeAuth.authenticate(req)).rejects.toEqual('unauthorized');
+    await expect(nodeAuth.authenticate(req)).rejects.toBeInstanceOf(
+      AuthRejection,
+    );
   });
 
-  test('should reject a replayed request', async () => {
+  test('should reject a replayed POST request', async () => {
     const req = makeRequest(makeNode());
 
     await nodeAuth.authenticate(req);
-    await expect(nodeAuth.authenticate(req)).rejects.toEqual('unauthorized');
+    await expect(nodeAuth.authenticate(req)).rejects.toEqual(
+      new AuthRejection('replayed signature'),
+    );
+  });
+
+  test('should accept identical GET requests in the same second', async () => {
+    const req = makeRequest(makeNode(), {
+      method: 'GET',
+      url: '/swap/abc123',
+      body: '',
+    });
+
+    await nodeAuth.authenticate(req);
+    await expect(nodeAuth.authenticate(req)).resolves.toBeDefined();
+  });
+
+  test('should give the reason of a rejection', async () => {
+    BlockedApiNodeRepository.isBlocked = jest.fn().mockResolvedValue(true);
+    const node = makeNode();
+
+    await expect(nodeAuth.authenticate(makeRequest(node))).rejects.toEqual(
+      new AuthRejection(`node ${node.nodeId} is blocked`),
+    );
   });
 
   test('should reject a blocked node', async () => {
@@ -200,7 +227,7 @@ describe('NodeAuth', () => {
 
     await expect(
       nodeAuth.authenticate(makeRequest(makeNode())),
-    ).rejects.toEqual('unauthorized');
+    ).rejects.toBeInstanceOf(AuthRejection);
     expect(isPublicNode).not.toHaveBeenCalled();
   });
 
@@ -211,7 +238,7 @@ describe('NodeAuth', () => {
       nodeAuth.authenticate(
         makeRequest(makeNode(), { method: 'GET', url: '/referral', body: '' }),
       ),
-    ).rejects.toEqual('unauthorized');
+    ).rejects.toBeInstanceOf(AuthRejection);
     expect(BlockedApiNodeRepository.block).not.toHaveBeenCalled();
     expect(sendMessage).not.toHaveBeenCalled();
   });
@@ -223,7 +250,7 @@ describe('NodeAuth', () => {
       nodeAuth.authenticate(
         makeRequest(node, { method: 'GET', url: '/referral', body: '' }),
       ),
-    ).rejects.toEqual('unauthorized');
+    ).rejects.toBeInstanceOf(AuthRejection);
 
     expect(BlockedApiNodeRepository.block).toHaveBeenCalledTimes(1);
     expect(BlockedApiNodeRepository.block).toHaveBeenCalledWith(
