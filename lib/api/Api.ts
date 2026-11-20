@@ -3,6 +3,7 @@ import express from 'express';
 import { ApiConfig } from '../Config';
 import type Logger from '../Logger';
 import type Redis from '../db/Redis';
+import type NotificationClient from '../notifications/NotificationClient';
 import type Service from '../service/Service';
 import Controller from './Controller';
 import SwapInfos from './SwapInfos';
@@ -43,6 +44,7 @@ class Api {
     private readonly config: ApiConfig,
     service: Service,
     redis?: Redis,
+    notifications?: NotificationClient,
   ) {
     this.app = express();
     this.app.set('trust proxy', true);
@@ -79,6 +81,8 @@ class Api {
       service,
       this.swapInfos,
       this.config.authSecret,
+      this.config.nodeAuth,
+      notifications,
     ).registerRoutes(this.app);
     this.registerRoutes(this.controller);
 

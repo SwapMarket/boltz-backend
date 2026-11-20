@@ -3,6 +3,7 @@ import type { NextFunction, Request, Response } from 'express';
 import type Logger from '../../Logger';
 import { getUnixTime } from '../../Utils';
 import { errorResponse } from '../Utils';
+import NodeAuth from './NodeAuth';
 
 // Restricts the v2 API to callers that know the configured "api.authSecret",
 // by requiring an HMAC-SHA256 of "<ts><method><path><body>", keyed by that
@@ -25,19 +26,30 @@ class Auth {
   // attacker without the secret can't grow this by spamming bogus ones
   private static readonly seenSignatures = new Map<string, number>();
 
-  public static middleware = (logger: Logger, secret?: string) => {
-    return (req: Request, res: Response, next: NextFunction): void => {
-      if (secret === undefined) {
-        next();
+  // A request carrying node headers is authenticated by its node signature
+  // instead of the shared secret, when node authentication is enabled
+  public static middleware = (
+    logger: Logger,
+    secret?: string,
+    nodeAuth?: NodeAuth,
+  ) => {
+    return async (
+      req: Request,
+      res: Response,
+      next: NextFunction,
+    ): Promise<void> => {
+      try {
+        if (nodeAuth !== undefined && NodeAuth.hasNodeHeaders(req)) {
+          await nodeAuth.authenticate(req);
+        } else if (secret !== undefined) {
+          Auth.verify(req, secret);
+        }
+      } catch (e) {
+        errorResponse(logger, req, res, e, 401);
         return;
       }
 
-      try {
-        Auth.verify(req, secret);
-        next();
-      } catch (e) {
-        errorResponse(logger, req, res, e, 401);
-      }
+      next();
     };
   };
 

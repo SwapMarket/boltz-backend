@@ -217,6 +217,20 @@ class ClnClient
     }
   };
 
+  // CLN only lists nodes that sent a node announcement, which needs a public
+  // channel; any error counts as no
+  public isPublicNode = async (publicKey: string): Promise<boolean> => {
+    try {
+      const { nodes } = await this.unaryNodeCall<
+        noderpc.ListnodesRequest,
+        noderpc.ListnodesResponse
+      >('listNodes', { id: getHexBuffer(publicKey) });
+      return nodes.length > 0;
+    } catch {
+      return false;
+    }
+  };
+
   public getInfo = async (): Promise<NodeInfo> => {
     const info = await this.unaryNodeCall<
       noderpc.GetinfoRequest,

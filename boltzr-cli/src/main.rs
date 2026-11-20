@@ -25,6 +25,13 @@ struct Transaction {
 }
 
 #[derive(Serialize)]
+struct BlockedApiNode {
+    node_id: String,
+    reason: String,
+    blocked_at: u64,
+}
+
+#[derive(Serialize)]
 struct Keys {
     public_key: String,
     private_key: String,
@@ -166,6 +173,11 @@ enum Commands {
     Signer {
         #[command(subcommand)]
         command: SignerCommands,
+    },
+    #[command(about = "Commands for Lightning nodes authenticating to the API by node signature")]
+    ApiNode {
+        #[command(subcommand)]
+        command: ApiNodeCommands,
     },
     #[command(about = "Rescans the chain of a symbol")]
     Rescan {
@@ -542,6 +554,24 @@ enum SignerCommands {
     },
     #[command(about = "Lists all disabled signer controls")]
     ListDisabled {},
+}
+
+#[derive(Clone, Subcommand)]
+enum ApiNodeCommands {
+    #[command(about = "Blocks one or more nodes from the API")]
+    Block {
+        #[arg(num_args = 1.., required = true)]
+        node_ids: Vec<String>,
+        #[arg(short, long)]
+        reason: String,
+    },
+    #[command(about = "Unblocks one or more nodes")]
+    Unblock {
+        #[arg(num_args = 1.., required = true)]
+        node_ids: Vec<String>,
+    },
+    #[command(about = "Lists all blocked nodes")]
+    ListBlocked {},
 }
 
 #[tokio::main]
@@ -1136,6 +1166,34 @@ async fn run_command(cli: Cli) -> Result<()> {
                         .into_iter()
                         .map(grpc::signer_name)
                         .collect::<Vec<String>>(),
+                )?;
+            }
+        },
+        Commands::ApiNode { ref command } => match command {
+            ApiNodeCommands::Block { node_ids, reason } => {
+                get_grpc_client(&cli)
+                    .await?
+                    .block_api_nodes(node_ids.clone(), reason.clone())
+                    .await?;
+            }
+            ApiNodeCommands::Unblock { node_ids } => {
+                get_grpc_client(&cli)
+                    .await?
+                    .unblock_api_nodes(node_ids.clone())
+                    .await?;
+            }
+            ApiNodeCommands::ListBlocked {} => {
+                let response = get_grpc_client(&cli).await?.get_blocked_api_nodes().await?;
+                print_pretty(
+                    &response
+                        .nodes
+                        .into_iter()
+                        .map(|node| BlockedApiNode {
+                            node_id: node.node_id,
+                            reason: node.reason,
+                            blocked_at: node.blocked_at,
+                        })
+                        .collect::<Vec<BlockedApiNode>>(),
                 )?;
             }
         },

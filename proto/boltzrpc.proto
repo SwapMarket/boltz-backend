@@ -40,6 +40,11 @@ service Boltz {
   rpc EnableSigners (EnableSignersRequest) returns (EnableSignersResponse);
   rpc GetDisabledSigners (GetDisabledSignersRequest) returns (GetDisabledSignersResponse);
 
+  /* Blocks, unblocks and lists Lightning nodes for API authentication by node signature */
+  rpc BlockApiNodes (BlockApiNodesRequest) returns (BlockApiNodesResponse);
+  rpc UnblockApiNodes (UnblockApiNodesRequest) returns (UnblockApiNodesResponse);
+  rpc GetBlockedApiNodes (GetBlockedApiNodesRequest) returns (GetBlockedApiNodesResponse);
+
   /* Gets funds locked by the server for swaps */
   rpc GetLockedFunds (GetLockedFundsRequest) returns (GetLockedFundsResponse);
 
@@ -308,6 +313,32 @@ message GetDisabledSignersRequest {}
 
 message GetDisabledSignersResponse {
   repeated Signer disabled_signers = 1;
+}
+
+message BlockApiNodesRequest {
+  repeated string node_ids = 1;
+  string reason = 2;
+}
+
+message BlockApiNodesResponse {}
+
+message UnblockApiNodesRequest {
+  repeated string node_ids = 1;
+}
+
+message UnblockApiNodesResponse {}
+
+message GetBlockedApiNodesRequest {}
+
+message GetBlockedApiNodesResponse {
+  message BlockedApiNode {
+    string node_id = 1;
+    string reason = 2;
+    // UNIX timestamp in seconds
+    uint64 blocked_at = 3;
+  }
+
+  repeated BlockedApiNode nodes = 1;
 }
 
 message GetLabelRequest {

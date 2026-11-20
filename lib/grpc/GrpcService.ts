@@ -28,6 +28,7 @@ import {
 } from '../consts/Enums';
 import type { ReferralConfig } from '../db/models/Referral';
 import type Referral from '../db/models/Referral';
+import BlockedApiNodeRepository from '../db/repositories/BlockedApiNodeRepository';
 import JwtTokenRepository from '../db/repositories/JwtTokenRepository';
 import PendingEthereumTransactionRepository from '../db/repositories/PendingEthereumTransactionRepository';
 import ReferralRepository from '../db/repositories/ReferralRepository';
@@ -268,6 +269,53 @@ class GrpcService {
     await GrpcService.handleCallback(_call, callback, async () => {
       return {
         disabledSigners: this.signerControlRegistry.getDisabledSigners(),
+      };
+    });
+  };
+
+  public blockApiNodes: handleUnaryCall<
+    boltzrpc.BlockApiNodesRequest,
+    boltzrpc.BlockApiNodesResponse
+  > = async (call, callback) => {
+    await GrpcService.handleCallback(call, callback, async () => {
+      const { nodeIds, reason } = call.request;
+      if (reason.trim() === '') {
+        throw new Error('a reason is required');
+      }
+
+      for (const nodeId of GrpcService.parseNodeIds(nodeIds)) {
+        await BlockedApiNodeRepository.block(nodeId, reason);
+        this.logger.info(`Blocked API node ${nodeId}: ${reason}`);
+      }
+      return {};
+    });
+  };
+
+  public unblockApiNodes: handleUnaryCall<
+    boltzrpc.UnblockApiNodesRequest,
+    boltzrpc.UnblockApiNodesResponse
+  > = async (call, callback) => {
+    await GrpcService.handleCallback(call, callback, async () => {
+      for (const nodeId of GrpcService.parseNodeIds(call.request.nodeIds)) {
+        if (await BlockedApiNodeRepository.unblock(nodeId)) {
+          this.logger.info(`Unblocked API node ${nodeId}`);
+        }
+      }
+      return {};
+    });
+  };
+
+  public getBlockedApiNodes: handleUnaryCall<
+    boltzrpc.GetBlockedApiNodesRequest,
+    boltzrpc.GetBlockedApiNodesResponse
+  > = async (call, callback) => {
+    await GrpcService.handleCallback(call, callback, async () => {
+      return {
+        nodes: (await BlockedApiNodeRepository.getAll()).map((node) => ({
+          nodeId: node.nodeId,
+          reason: node.reason,
+          blockedAt: Math.round(node.createdAt.getTime() / 1000).toString(),
+        })),
       };
     });
   };
@@ -856,6 +904,20 @@ class GrpcService {
       details: message,
       message,
     };
+  };
+
+  private static parseNodeIds = (nodeIds: string[]): string[] => {
+    if (nodeIds.length === 0) {
+      throw new Error('no node IDs given');
+    }
+
+    return nodeIds.map((nodeId) => {
+      const normalized = nodeId.trim().toLowerCase();
+      if (!/^0[23][0-9a-f]{64}$/.test(normalized)) {
+        throw new Error(`invalid node ID: ${nodeId}`);
+      }
+      return normalized;
+    });
   };
 
   private static assertValidSigners = (signers: boltzrpc.Signer[]) => {

@@ -186,6 +186,37 @@ impl BoltzClient {
         Ok(response.into_inner())
     }
 
+    pub async fn block_api_nodes(
+        &mut self,
+        node_ids: Vec<String>,
+        reason: String,
+    ) -> Result<boltz_rpc::BlockApiNodesResponse> {
+        let response = self
+            .client
+            .block_api_nodes(self.req(boltz_rpc::BlockApiNodesRequest { node_ids, reason }))
+            .await?;
+        Ok(response.into_inner())
+    }
+
+    pub async fn unblock_api_nodes(
+        &mut self,
+        node_ids: Vec<String>,
+    ) -> Result<boltz_rpc::UnblockApiNodesResponse> {
+        let response = self
+            .client
+            .unblock_api_nodes(self.req(boltz_rpc::UnblockApiNodesRequest { node_ids }))
+            .await?;
+        Ok(response.into_inner())
+    }
+
+    pub async fn get_blocked_api_nodes(&mut self) -> Result<boltz_rpc::GetBlockedApiNodesResponse> {
+        let response = self
+            .client
+            .get_blocked_api_nodes(self.req(boltz_rpc::GetBlockedApiNodesRequest {}))
+            .await?;
+        Ok(response.into_inner())
+    }
+
     pub async fn calculate_transaction_fee(
         &mut self,
         symbol: String,
