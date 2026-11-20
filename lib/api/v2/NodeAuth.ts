@@ -6,6 +6,7 @@ import { getHexString, getUnixTime } from '../../Utils';
 import BlockedApiNodeRepository from '../../db/repositories/BlockedApiNodeRepository';
 import type NotificationClient from '../../notifications/NotificationClient';
 import type { Currency } from '../../wallet/WalletManager';
+import AuthRejection, { isReplayProtected } from './AuthRejection';
 import { apiPrefix } from './Consts';
 
 // Authenticates "/v2" requests by the Lightning node that signed them, so a
@@ -31,8 +32,6 @@ class NodeAuth {
   private static readonly timestampDeltaTolerance = 60;
   private static readonly publicCacheSeconds = 60 * 60;
   private static readonly notPublicCacheSeconds = 2 * 60;
-
-  private static readonly errorUnauthorized = 'unauthorized';
 
   // The reverse swap endpoints CLBOSS uses: the reverse pairs, creating a
   // swap, its status and the cooperative claim
@@ -87,12 +86,12 @@ class NodeAuth {
   ): string => {
     const bytes = NodeAuth.decodeZbase32(signature);
     if (bytes.length !== 65) {
-      throw NodeAuth.errorUnauthorized;
+      throw new AuthRejection('malformed signature');
     }
 
     const header = bytes[0];
     if (header < 27 || header > 34) {
-      throw NodeAuth.errorUnauthorized;
+      throw new AuthRejection('malformed signature');
     }
 
     const digest = sha256(
@@ -109,7 +108,7 @@ class NodeAuth {
         ),
       );
     } catch {
-      throw NodeAuth.errorUnauthorized;
+      throw new AuthRejection('malformed signature');
     }
   };
 
@@ -143,7 +142,7 @@ class NodeAuth {
     for (const char of encoded) {
       const value = NodeAuth.zbase32Alphabet.indexOf(char);
       if (value === -1) {
-        throw NodeAuth.errorUnauthorized;
+        throw new AuthRejection('malformed signature');
       }
 
       buffer = ((buffer << 5) | value) & 0xffff;
@@ -163,8 +162,11 @@ class NodeAuth {
     const signature = req.get(NodeAuth.signatureHeader);
     const ts = NodeAuth.checkTimestamp(req.get(NodeAuth.timestampHeader));
 
-    if (!/^0[23][0-9a-f]{64}$/.test(nodeId) || signature === undefined) {
-      throw NodeAuth.errorUnauthorized;
+    if (!/^0[23][0-9a-f]{64}$/.test(nodeId)) {
+      throw new AuthRejection('malformed node ID');
+    }
+    if (signature === undefined) {
+      throw new AuthRejection(`missing signature of node ${nodeId}`);
     }
 
     const path = NodeAuth.signedPath(req);
@@ -180,21 +182,20 @@ class NodeAuth {
       signature,
     );
     if (signer !== nodeId) {
-      throw NodeAuth.errorUnauthorized;
+      throw new AuthRejection(`signature is not by node ${nodeId}`);
     }
 
-    this.checkReplay(signature, ts);
+    if (isReplayProtected(req.method)) {
+      this.checkReplay(signature, ts);
+    }
 
     if (await BlockedApiNodeRepository.isBlocked(nodeId)) {
-      throw NodeAuth.errorUnauthorized;
+      throw new AuthRejection(`node ${nodeId} is blocked`);
     }
 
     // Before the route check, so throwaway keys cannot fill the block list
     if (!(await this.isPublicNode(nodeId))) {
-      this.logger.debug(
-        `Rejected API request of node ${nodeId}: not public in our graph`,
-      );
-      throw NodeAuth.errorUnauthorized;
+      throw new AuthRejection(`node ${nodeId} is not public in our graph`);
     }
 
     if (!NodeAuth.isAllowedRoute(req.method, path)) {
@@ -202,7 +203,7 @@ class NodeAuth {
         nodeId,
         `requested ${req.method} ${path} from ${req.ip}`,
       );
-      throw NodeAuth.errorUnauthorized;
+      throw new AuthRejection(`node ${nodeId} blocked for an unallowed route`);
     }
 
     return nodeId;
@@ -262,7 +263,7 @@ class NodeAuth {
     }
 
     if (this.seenSignatures.has(signature)) {
-      throw NodeAuth.errorUnauthorized;
+      throw new AuthRejection('replayed signature');
     }
 
     this.seenSignatures.set(signature, ts + NodeAuth.timestampDeltaTolerance);
@@ -270,7 +271,7 @@ class NodeAuth {
 
   private static checkTimestamp = (providedTsRaw?: string): number => {
     if (providedTsRaw === undefined || !/^[0-9]+$/.test(providedTsRaw)) {
-      throw NodeAuth.errorUnauthorized;
+      throw new AuthRejection('missing or malformed timestamp');
     }
 
     const providedTs = parseInt(providedTsRaw, 10);
@@ -279,7 +280,9 @@ class NodeAuth {
       providedTs > now + NodeAuth.timestampDeltaTolerance ||
       providedTs < now - NodeAuth.timestampDeltaTolerance
     ) {
-      throw NodeAuth.errorUnauthorized;
+      throw new AuthRejection(
+        `timestamp ${providedTs} is ${now - providedTs}s off server time`,
+      );
     }
 
     return providedTs;
