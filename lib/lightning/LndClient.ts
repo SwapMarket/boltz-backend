@@ -611,6 +611,16 @@ class LndClient extends BaseClient<EventTypes> implements LightningClient {
     );
   };
 
+  // Whether the node has channels announced in our graph; any error, an
+  // unknown node included, counts as no
+  public isPublicNode = async (publicKey: string): Promise<boolean> => {
+    try {
+      return (await this.getNodeInfo(publicKey)).numChannels > 0;
+    } catch {
+      return false;
+    }
+  };
+
   /**
    * Establish a connection to a remote peer
    *

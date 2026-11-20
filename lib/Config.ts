@@ -140,6 +140,9 @@ type ApiConfig = {
   // When set, all "/v2" requests must carry an "x-api-signature" header with
   // the HMAC-SHA256 of the raw request body keyed by this secret
   authSecret?: string;
+  // Lets public Lightning nodes call the reverse swap endpoints with requests
+  // signed by their node key instead of the secret
+  nodeAuth?: boolean;
 };
 
 type GrpcJwtConfig = {

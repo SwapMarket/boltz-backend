@@ -5,6 +5,7 @@ import type Logger from '../Logger';
 import type { Currency } from '../wallet/WalletManager';
 import type WalletManager from '../wallet/WalletManager';
 import Migration from './Migration';
+import BlockedApiNode from './models/BlockedApiNode';
 import ChainSwap from './models/ChainSwap';
 import ChainSwapData from './models/ChainSwapData';
 import ChainTip from './models/ChainTip';
@@ -117,6 +118,7 @@ class Database {
       TransactionLabel.sync(),
       PendingEthereumTransaction.sync(),
       JwtToken.sync(),
+      BlockedApiNode.sync(),
     ]);
 
     await Promise.all([Swap.sync(), ReverseSwap.sync(), ChainSwap.sync()]);
@@ -167,6 +169,7 @@ class Database {
     KeyProvider.load(Database.sequelize);
     DatabaseVersion.load(Database.sequelize);
     DisabledSigner.load(Database.sequelize);
+    BlockedApiNode.load(Database.sequelize);
     ReverseRoutingHint.load(Database.sequelize);
     PendingLockupTransaction.load(Database.sequelize);
     PendingEthereumTransaction.load(Database.sequelize);

@@ -10,6 +10,7 @@ import {
 import type Api from '../../../lib/api/Api';
 import { CurrencyType, SwapType } from '../../../lib/consts/Enums';
 import type PendingEthereumTransaction from '../../../lib/db/models/PendingEthereumTransaction';
+import BlockedApiNodeRepository from '../../../lib/db/repositories/BlockedApiNodeRepository';
 import PendingEthereumTransactionRepository from '../../../lib/db/repositories/PendingEthereumTransactionRepository';
 import ReferralRepository from '../../../lib/db/repositories/ReferralRepository';
 import TransactionLabelRepository from '../../../lib/db/repositories/TransactionLabelRepository';
@@ -1288,6 +1289,77 @@ describe('GrpcService', () => {
           threshold: 123,
         },
       ]);
+    });
+  });
+
+  describe('API node blocks', () => {
+    const nodeId = `02${'ab'.repeat(32)}`;
+
+    const call = <T>(
+      handler: (call: any, callback: (error: any, response: T) => void) => any,
+      request: object,
+    ) =>
+      new Promise<T>((resolve, reject) => {
+        handler({ request } as any, (error, response) =>
+          error ? reject(error) : resolve(response),
+        );
+      });
+
+    beforeEach(() => {
+      BlockedApiNodeRepository.block = jest.fn().mockResolvedValue(undefined);
+      BlockedApiNodeRepository.unblock = jest.fn().mockResolvedValue(true);
+    });
+
+    test('should block nodes, normalizing their IDs', async () => {
+      await expect(
+        call(grpcService.blockApiNodes, {
+          nodeIds: [` ${nodeId.toUpperCase()} `],
+          reason: 'probing',
+        }),
+      ).resolves.toEqual({});
+
+      expect(BlockedApiNodeRepository.block).toHaveBeenCalledWith(
+        nodeId,
+        'probing',
+      );
+    });
+
+    test.each`
+      nodeIds                   | reason       | error
+      ${[nodeId]}               | ${' '}       | ${'a reason is required'}
+      ${[]}                     | ${'probing'} | ${'no node IDs given'}
+      ${['04'.padEnd(66, 'a')]} | ${'probing'} | ${`invalid node ID: ${'04'.padEnd(66, 'a')}`}
+      ${[nodeId.slice(0, -2)]}  | ${'probing'} | ${`invalid node ID: ${nodeId.slice(0, -2)}`}
+    `(
+      'should reject blocking $nodeIds for "$reason"',
+      async ({ nodeIds, reason, error }) => {
+        await expect(
+          call(grpcService.blockApiNodes, { nodeIds, reason }),
+        ).rejects.toEqual(new Error(error));
+        expect(BlockedApiNodeRepository.block).not.toHaveBeenCalled();
+      },
+    );
+
+    test('should unblock nodes', async () => {
+      await expect(
+        call(grpcService.unblockApiNodes, { nodeIds: [nodeId] }),
+      ).resolves.toEqual({});
+
+      expect(BlockedApiNodeRepository.unblock).toHaveBeenCalledWith(nodeId);
+    });
+
+    test('should list blocked nodes', async () => {
+      BlockedApiNodeRepository.getAll = jest.fn().mockResolvedValue([
+        {
+          nodeId,
+          reason: 'probing',
+          createdAt: new Date(1_700_000_000_000),
+        },
+      ]);
+
+      await expect(call(grpcService.getBlockedApiNodes, {})).resolves.toEqual({
+        nodes: [{ nodeId, reason: 'probing', blockedAt: '1700000000' }],
+      });
     });
   });
 

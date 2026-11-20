@@ -251,6 +251,7 @@ class Boltz {
         this.config.api,
         this.service,
         this.redis,
+        notificationClient,
       );
 
       const jwtSigner = new JwtSigner(this.logger, this.config.grpc);

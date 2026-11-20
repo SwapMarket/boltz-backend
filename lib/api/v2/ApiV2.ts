@@ -1,9 +1,11 @@
 import type { Application } from 'express';
 import type Logger from '../../Logger';
+import type NotificationClient from '../../notifications/NotificationClient';
 import type Service from '../../service/Service';
 import type SwapInfos from '../SwapInfos';
 import Auth from './Auth';
 import { apiPrefix } from './Consts';
+import NodeAuth from './NodeAuth';
 import ChainRouter from './routers/ChainRouter';
 import CommitmentRouter from './routers/CommitmentRouter';
 import InfoRouter from './routers/InfoRouter';
@@ -13,14 +15,31 @@ import type RouterBase from './routers/RouterBase';
 import SwapRouter from './routers/SwapRouter';
 
 class ApiV2 {
+  private static readonly nodeAuthSymbol = 'BTC';
+
   private readonly routers: RouterBase[];
+  private readonly nodeAuth?: NodeAuth;
 
   constructor(
     private readonly logger: Logger,
     service: Service,
     swapInfos: SwapInfos,
     private readonly authSecret?: string,
+    nodeAuth = false,
+    notifications?: NotificationClient,
   ) {
+    if (nodeAuth) {
+      const currency = service.currencies.get(ApiV2.nodeAuthSymbol);
+      if (currency === undefined) {
+        throw new Error(
+          `node authentication needs the ${ApiV2.nodeAuthSymbol} currency`,
+        );
+      }
+
+      this.nodeAuth = new NodeAuth(this.logger, currency, notifications);
+      this.logger.info('Enabled API authentication by Lightning node');
+    }
+
     this.routers = [
       new InfoRouter(this.logger, service),
       new SwapRouter(this.logger, service, swapInfos),
@@ -32,7 +51,10 @@ class ApiV2 {
   }
 
   public registerRoutes = (app: Application) => {
-    app.use(apiPrefix, Auth.middleware(this.logger, this.authSecret));
+    app.use(
+      apiPrefix,
+      Auth.middleware(this.logger, this.authSecret, this.nodeAuth),
+    );
 
     this.routers.forEach((router) =>
       app.use(`${apiPrefix}/${router.path}`, router.getRouter()),
