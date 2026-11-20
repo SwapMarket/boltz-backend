@@ -3,4 +3,4 @@
 	url = https://github.com/SwapMarket/regtest.git
 [submodule "hold"]
 	path = hold
-	url = https://github.com/BoltzExchange/hold.git
+	url = https://github.com/SwapMarket/hold.git
