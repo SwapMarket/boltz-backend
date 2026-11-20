@@ -5,14 +5,79 @@ on:
     branches: [master]
   pull_request:
 
+# Pull requests run only the jobs their changes can affect; pushes to master
+# run everything, which also keeps the build caches current
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      rust: ${{ steps.filter.outputs.rust }}
+      boltz-core: ${{ steps.filter.outputs.boltz-core }}
+      api: ${{ steps.filter.outputs.api }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6
+
+      - name: Detect changed parts
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            ci: &ci
+              - '.github/**'
+            rust: &rust
+              - *ci
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'boltz-*/**'
+              - 'boltzr/**'
+              - 'boltzr-cli/**'
+              - 'proto/**'
+              - 'hold'
+              - 'regtest'
+              - 'tools/**'
+            boltz-core:
+              - *ci
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'boltz-core/**'
+              - 'justfile'
+            # The integration tests run the sidecar, so Rust changes count
+            backend:
+              - *rust
+              - 'lib/**'
+              - 'test/**'
+              - 'bin/**'
+              - 'package.json'
+              - 'package-lock.json'
+              - '*.js'
+              - '*.mjs'
+              - 'tsconfig*.json'
+              - 'swagger-spec.json'
+            api:
+              - *ci
+              - 'lib/**'
+              - 'proto/**'
+              - 'package.json'
+              - 'package-lock.json'
+              - 'swagger*'
+              - 'tools/**'
+
   build:
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.backend == 'true'
     timeout-minutes: 60
     strategy:
       matrix:
         platform: [ubuntu-latest]
         node-version: [24]
-        rust-version: [stable]
+        # Pinned so a new stable release does not invalidate every build
+        # cache or fail clippy unannounced; bump it deliberately
+        rust-version: ['1.100.0']
 
     runs-on: ${{ matrix.platform }}
 
@@ -62,6 +127,8 @@ jobs:
         run: node run-int.js
 
   build-rust:
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
     timeout-minutes: 60
     permissions:
       contents: read
@@ -69,7 +136,9 @@ jobs:
       matrix:
         platform: [ubuntu-latest]
         node-version: [24]
-        rust-version: [stable]
+        # Pinned so a new stable release does not invalidate every build
+        # cache or fail clippy unannounced; bump it deliberately
+        rust-version: ['1.100.0']
 
     runs-on: ${{ matrix.platform }}
 
@@ -121,12 +190,17 @@ jobs:
           MEMPOOL_API_URL: ${{ vars.MEMPOOL_API_URL }}
 
   build-boltz-core:
+    needs: changes
+    if:
+      github.event_name == 'push' || needs.changes.outputs.boltz-core == 'true'
     timeout-minutes: 60
     strategy:
       matrix:
         platform: [ubuntu-latest]
         node-version: [24]
-        rust-version: [stable]
+        # Pinned so a new stable release does not invalidate every build
+        # cache or fail clippy unannounced; bump it deliberately
+        rust-version: ['1.100.0']
 
     runs-on: ${{ matrix.platform }}
 
@@ -153,6 +227,8 @@ jobs:
         run: just boltz-core-docs-features
 
   api-generation-validation:
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.api == 'true'
     timeout-minutes: 60
     strategy:
       matrix:
