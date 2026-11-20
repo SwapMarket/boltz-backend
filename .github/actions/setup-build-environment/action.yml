@@ -11,7 +11,7 @@ inputs:
     required: true
 
   cache-prefix:
-    description: 'Prefix for Rust build cache key'
+    description: 'Key of the Rust build cache, one per kind of build'
     required: true
 
 runs:
@@ -50,18 +50,12 @@ runs:
       shell: bash
       run: npm ci
 
+    # Caches the dependencies and the cargo registry, not our own crates,
+    # which change with nearly every commit. Saved only from master, which
+    # pull requests restore from, so they do not fill the cache quota with
+    # copies of their own
     - name: Rust build cache
-      uses: actions/cache@v5
+      uses: Swatinem/rust-cache@v2
       with:
-        path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          target/
-        key:
-          ${{ runner.os }}-${{ inputs.cache-prefix }}-${{
-          steps.rust-toolchain.outputs.version }}-${{ hashFiles('**/Cargo.lock')
-          }}
-        restore-keys: |
-          ${{ runner.os }}-${{ inputs.cache-prefix }}-${{ steps.rust-toolchain.outputs.version }}-
+        shared-key: ${{ inputs.cache-prefix }}
+        save-if: ${{ github.ref == 'refs/heads/master' }}
