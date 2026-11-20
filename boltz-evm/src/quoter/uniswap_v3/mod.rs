@@ -649,6 +649,49 @@ mod test {
         assert_eq!(reversed_twice, data);
     }
 
+    // Quotes come from the live chain, which moves between the quoter's lookup
+    // and the per-fee lookups here, so they are compared within a margin: the
+    // quote has to be close to the best fee tier's, and the tier the quoter
+    // picked has to be about as good as the best one
+    fn assert_selected_best(
+        fee_results: &[(u64, U256)],
+        best: U256,
+        quote: U256,
+        data: QuoterData,
+        token_in: Address,
+        token_out: Address,
+    ) {
+        const MAX_DIFF_BPS: u64 = 50;
+
+        let assert_close = |actual: U256, expected: U256| {
+            let diff = if actual > expected {
+                actual - expected
+            } else {
+                expected - actual
+            };
+            assert!(
+                diff * U256::from(10_000) <= expected * U256::from(MAX_DIFF_BPS),
+                "{actual} differs from {expected} by more than {MAX_DIFF_BPS} bps"
+            );
+        };
+
+        assert_close(quote, best);
+
+        let QuoterData::UniswapV3(Data {
+            token_in: data_token_in,
+            hops,
+        }) = data;
+        assert_eq!(data_token_in, token_in);
+        assert_eq!(hops.len(), 1);
+        assert_eq!(hops[0].token, token_out);
+
+        let selected = fee_results
+            .iter()
+            .find(|(fee, _)| *fee == hops[0].fee)
+            .expect("selected fee tier was quoted");
+        assert_close(selected.1, best);
+    }
+
     #[tokio::test]
     async fn test_quote_input() {
         let quoter = UniswapV3::new(
@@ -732,16 +775,13 @@ mod test {
             .max_by_key(|(_, amount)| *amount)
             .unwrap();
 
-        assert_eq!(best_result.1, quote);
-        assert_eq!(
-            QuoterData::UniswapV3(Data {
-                token_in,
-                hops: vec![Hop {
-                    fee: best_result.0,
-                    token: token_out,
-                }],
-            }),
-            data
+        assert_selected_best(
+            &fee_results,
+            best_result.1,
+            quote,
+            data,
+            token_in,
+            token_out,
         );
     }
 
@@ -864,16 +904,13 @@ mod test {
             .min_by_key(|(_, amount)| *amount)
             .unwrap();
 
-        assert_eq!(best_result.1, quote);
-        assert_eq!(
-            QuoterData::UniswapV3(Data {
-                token_in,
-                hops: vec![Hop {
-                    fee: best_result.0,
-                    token: token_out,
-                }],
-            }),
-            data
+        assert_selected_best(
+            &fee_results,
+            best_result.1,
+            quote,
+            data,
+            token_in,
+            token_out,
         );
     }
 
